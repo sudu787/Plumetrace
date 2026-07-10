@@ -2,9 +2,9 @@
 PlumeTrace PINN - Utilities
 Reproducibility, EMA, checkpointing, logging, metrics, and helper functions.
 """
-
 from __future__ import annotations
 
+from collections import deque
 import json
 import logging
 import math
@@ -81,35 +81,67 @@ def count_parameters(model: nn.Module) -> int:
 
 class EMA:
     """
-    Exponential Moving Average of model parameters.
-    Maintains a shadow copy of parameters that updates slowly.
+    Exponential Moving Average of model parameters and buffers.
+    Maintains a shadow copy of state dict that updates slowly.
     """
     def __init__(self, model: nn.Module, decay: float = 0.999) -> None:
         self.decay = decay
-        self.shadow: Dict[str, Tensor] = {}
-        for name, param in unwrap_model(model).named_parameters():
-            if param.requires_grad:
-                self.shadow[name] = param.detach().clone()
+        self.shadow = {k: v.detach().clone() for k, v in unwrap_model(model).state_dict().items()}
 
     def update(self, model: nn.Module) -> None:
-        """Update shadow parameters with EMA formula."""
-        unwrapped = unwrap_model(model)
-        for name, param in unwrapped.named_parameters():
-            if param.requires_grad and name in self.shadow:
-                self.shadow[name].mul_(self.decay).add_(param.detach(), alpha=1.0 - self.decay)
+        """Update shadow state dict with EMA formula."""
+        for k, v in unwrap_model(model).state_dict().items():
+            if v.dtype.is_floating_point:
+                self.shadow[k].mul_(self.decay).add_(v.detach(), alpha=1.0 - self.decay)
+            else:
+                self.shadow[k] = v.detach().clone()
 
     def copy_to(self, model: nn.Module) -> None:
-        """Copy EMA parameters into the model."""
-        unwrapped = unwrap_model(model)
-        for name, param in unwrapped.named_parameters():
-            if name in self.shadow:
-                param.data.copy_(self.shadow[name])
+        """Copy EMA state dict into the model."""
+        unwrap_model(model).load_state_dict(self.shadow, strict=True)
 
     def state_dict(self) -> Dict[str, Tensor]:
         return {k: v.clone() for k, v in self.shadow.items()}
 
     def load_state_dict(self, state_dict: Dict[str, Tensor]) -> None:
         self.shadow = {k: v.clone() for k, v in state_dict.items()}
+
+
+# ── SoftAdapt Dynamic Weighting ───────────────────────────────────
+
+class SoftAdaptWeighter:
+    """
+    SoftAdapt dynamic loss weighting (Heydari et al., 2019).
+    Reweights loss components based on their rate of change over a rolling window.
+    """
+    def __init__(self, names: list[str], beta: float, floor: float, ceil: float, window_size: int = 20) -> None:
+        self.names = names
+        self.beta = beta
+        self.floor = floor
+        self.ceil = ceil
+        self.window_size = max(2, window_size)
+        self.history: deque[dict[str, float]] = deque(maxlen=self.window_size)
+
+    def compute(self, current: dict[str, float]) -> dict[str, float]:
+        self.history.append(dict(current))
+        if len(self.history) < 2:
+            return {n: 1.0 for n in self.names}
+        
+        first = self.history[0]
+        last = self.history[-1]
+        
+        rates = []
+        for n in self.names:
+            first_val = first[n]
+            last_val = last[n]
+            rate = (last_val - first_val) / (abs(first_val) + 1e-8)
+            rates.append(rate)
+            
+        rates = np.array(rates)
+        shifted = rates - rates.max()
+        exp = np.exp(self.beta * shifted)
+        raw = np.clip(exp / exp.sum() * len(self.names), self.floor, self.ceil)
+        return dict(zip(self.names, raw.tolist()))
 
 
 # ── Checkpointing ─────────────────────────────────────────────────

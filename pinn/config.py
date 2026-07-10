@@ -33,73 +33,67 @@ class CitySector:
 class ModelConfig:
     """Neural network architecture configuration."""
     arch_type: Literal[
-        'mlp', 'residual', 'fourier_residual', 'siren', 'multiscale'
+        'mlp', 'residual', 'fourier_residual', 'siren'
     ] = 'fourier_residual'
     hidden_units: int = 128
-    hidden_layers: int = 9          # 9-layer deep network (was 8, now odd for proper skip pairing)
-    fourier_features: int = 256     # Fourier feature dimension (was 128 in script, now 256)
-    fourier_bands: int = 128        # Number of Fourier frequency bands
-    fourier_sigma: float = 1.0      # Gaussian std for Fourier frequency sampling
+    hidden_layers: int = 8          # Match notebook 8 layers
+    fourier_bands: int = 8          # Match notebook 8 frequency bands
+    fourier_sigma: float = 4.0      # Match notebook sigma=4.0
     siren_omega0_first: float = 30.0
     siren_omega0_hidden: float = 30.0
     use_adaptive_activation: bool = True
     use_layer_norm: bool = True
     use_attention: bool = False     # Optional attention block after residual layers
     dropout: float = 0.0
-    # FIX: Gradient checkpointing properly implemented via config flag
-    use_grad_checkpoint: bool = True
+    # Gradient checkpointing gated by model_config flag
+    use_grad_checkpoint: bool = False
 
 
 @dataclass(frozen=True)
 class TrainingConfig:
     """Optimization and physics settings for the inversion experiment."""
     # ── Epochs & Stages ─────────────────────────────────────────────
-    adamw_epochs: int = 2000
-    lbfgs_epochs: int = 100
-    lbfgs_max_iter: int = 20        # Internal L-BFGS iterations per step
+    epochs: int = 2500              # Total AdamW epochs
+    learning_rate: float = 1.0e-3
+    weight_decay: float = 1.0e-5
+
+    # ── Stage-2 L-BFGS fine-tuning ──────────────────────────────────
+    lbfgs_steps: int = 200          # Maximum iterations for one-shot L-BFGS call
     lbfgs_lr: float = 0.5
-    lbfgs_history_size: int = 50
 
     # ── Learning Rate ────────────────────────────────────────────────
-    learning_rate: float = 2.0e-3
     warmup_epochs: int = 100
-    min_lr_ratio: float = 0.01    # Cosine annealing minimum ratio
-    use_reduce_lr_on_plateau: bool = True
+    min_lr_ratio: float = 0.08      # Cosine annealing minimum ratio (eta_min ratio)
+    use_reduce_lr_on_plateau: bool = False
     reduce_lr_patience: int = 150
     reduce_lr_factor: float = 0.5
 
     # ── Loss Weights (Base; adaptive methods override dynamically) ──
     lambda_data: float = 1.0
     lambda_physics: float = 0.10
-    lambda_boundary: float = 0.05
-    lambda_initial: float = 0.0   # NEW: Initial condition loss weight
-    lambda_source: float = 0.0      # NEW: Source localization prior loss
+    lambda_boundary: float = 0.02
+    lambda_initial: float = 0.0   # Initial condition loss weight
+    lambda_source: float = 0.0      # Source localization prior loss
 
     # ── Adaptive Weighting ────────────────────────────────────────────
-    adapt_every: int = 25
+    adapt_every: int = 1
     adapt_method: Literal['softadapt', 'gradnorm', 'ntk', 'fixed'] = 'softadapt'
     softadapt_beta: float = 0.1
     softadapt_floor: float = 0.05
     softadapt_ceil: float = 5.0
     softadapt_warmup_epochs: int = 20
+    softadapt_window_size: int = 20  # Number of historical epochs for rate computation
     gradnorm_alpha: float = 1.5
-
-    # ── Architecture ────────────────────────────────────────────────
-    hidden_layers: int = 9
-    hidden_units: int = 128
-    fourier_features: int = 256
-    fourier_sigma: float = 1.0
-    use_grad_checkpoint: bool = True
     gradient_clip_norm: float = 5.0
 
     # ── Sampling Points ─────────────────────────────────────────────
-    collocation_points: int = 8192
+    collocation_points: int = 2000  # Default collocation count
     boundary_points: int = 1024
-    initial_points: int = 512     # NEW: Points for t=0 initial condition
-    source_prior_points: int = 256  # NEW: Points for source localization prior
+    initial_points: int = 512     # Points for t=0 initial condition
+    source_prior_points: int = 256  # Points for source localization prior
 
     # ── RAR (Residual Adaptive Refinement) ──────────────────────────
-    rar_every: int = 200
+    rar_interval: int = 100         # Refresh high-residual points every N epochs (rar_every)
     rar_eval_points: int = 50000
     rar_add_points: int = 1000
     rar_max_points: int = 32000

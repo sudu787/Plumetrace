@@ -46,72 +46,16 @@ except ImportError as exc:
 LOGGER = logging.getLogger("plumetrace.pinn")
 
 
-@dataclass(frozen=True)
-class SensorStation:
-    """A deterministic virtual sensor location inside the industrial sector."""
-    sensor_id: str
-    latitude: float
-    longitude: float
-
-
-@dataclass(frozen=True)
-class CitySector:
-    """Geographic bounds and known demo source for the synthetic scenario."""
-    lat_min: float = 40.7040
-    lat_max: float = 40.7220
-    lon_min: float = -74.0160
-    lon_max: float = -73.9940
-    source_latitude: float = 40.7138
-    source_longitude: float = -74.0072
-
-
-@dataclass(frozen=True)
-class ModelConfig:
-    arch_type: Literal['mlp', 'residual', 'fourier_residual', 'siren'] = 'fourier_residual'
-    hidden_units: int = 128
-    hidden_layers: int = 8
-    fourier_bands: int = 8
-    fourier_sigma: float = 4.0
-    siren_omega0_first: float = 30.0
-    siren_omega0_hidden: float = 30.0
-    use_adaptive_activation: bool = True
-
-
-@dataclass(frozen=True)
-class TrainingConfig:
-    """Optimization and physics settings for the inversion experiment."""
-    epochs: int = 2500
-    learning_rate: float = 1.0e-3
-    weight_decay: float = 1.0e-5
-    lambda_data: float = 1.0
-    lambda_physics: float = 0.10
-    lambda_boundary: float = 0.02
-    collocation_points: int = 4096
-    boundary_points: int = 1024
-    log_every: int = 50
-    wind_u: float = 0.16
-    wind_v: float = -0.06
-    diffusion: float = 0.006
-    sensor_time_samples: int = 64
-    random_seed: int = 2026
-    gradient_clip_norm: float = 5.0
-
-    warmup_epochs: int = 100
-    min_lr_ratio: float = 0.08
-    ema_decay: float = 0.999
-
-    rar_interval: int = 100
-    rar_fraction: float = 0.25
-    rar_pool_multiplier: int = 4
-    rar_warmup_epochs: int = 200
-
-    softadapt_beta: float = 0.1
-    softadapt_floor: float = 0.05
-    softadapt_ceil: float = 5.0
-    softadapt_warmup_epochs: int = 20
-
-    lbfgs_steps: int = 200
-    lbfgs_lr: float = 0.5
+from pinn.config import SensorStation, CitySector, ModelConfig, TrainingConfig, SENSOR_STATIONS, SECTOR
+from pinn.utils import (
+    seed_everything as set_reproducibility,
+    get_device,
+    configure_logging,
+    lat_lon_to_normalized as _lat_lon_to_normalized,
+    normalized_to_lat_lon as _normalized_to_lat_lon,
+    EMA,
+    SoftAdaptWeighter
+)
 
 
 @dataclass
@@ -133,54 +77,12 @@ class SourceProbabilityMap:
     probabilities: np.ndarray
 
 
-SENSOR_STATIONS: tuple[SensorStation, ...] = (
-    SensorStation("industrial_north", 40.7180, -74.0060),
-    SensorStation("residential_east", 40.7140, -73.9980),
-    SensorStation("park_south", 40.7080, -74.0040),
-    SensorStation("river_west", 40.7120, -74.0120),
-)
-
-
-def configure_logging() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
-    )
-
-
-def set_reproducibility(seed: int) -> None:
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.benchmark = False
-    torch.backends.cudnn.deterministic = True
-    if hasattr(torch, 'set_float32_matmul_precision'):
-        torch.set_float32_matmul_precision('high')
-
-
-def get_device() -> torch.device:
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        device = torch.device("mps")
-    else:
-        device = torch.device("cpu")
-    LOGGER.info("Using device: %s", device)
-    return device
-
-
 def lat_lon_to_normalized(
     latitude: float | np.ndarray,
     longitude: float | np.ndarray,
     sector: CitySector,
 ) -> tuple[np.ndarray, np.ndarray]:
-    lon_arr = np.asarray(longitude, dtype=np.float32)
-    lat_arr = np.asarray(latitude, dtype=np.float32)
-    x = (lon_arr - sector.lon_min) / (sector.lon_max - sector.lon_min)
-    y = (lat_arr - sector.lat_min) / (sector.lat_max - sector.lat_min)
-    return x.astype(np.float32), y.astype(np.float32)
+    return _lat_lon_to_normalized(latitude, longitude, sector.lat_min, sector.lat_max, sector.lon_min, sector.lon_max)
 
 
 def normalized_to_lat_lon(
@@ -188,9 +90,7 @@ def normalized_to_lat_lon(
     y: np.ndarray,
     sector: CitySector,
 ) -> tuple[np.ndarray, np.ndarray]:
-    longitude = sector.lon_min + x * (sector.lon_max - sector.lon_min)
-    latitude = sector.lat_min + y * (sector.lat_max - sector.lat_min)
-    return latitude.astype(np.float32), longitude.astype(np.float32)
+    return _normalized_to_lat_lon(x, y, sector.lat_min, sector.lat_max, sector.lon_min, sector.lon_max)
 
 
 # ============================================================
@@ -322,7 +222,10 @@ class PlumeInversionPINN(nn.Module):
             encoded = self.encoder(features) if self.encoder is not None else features
             hidden = self.input_act(self.input_proj(encoded))
             for block in self.blocks:
-                hidden = block(hidden)
+                if getattr(self.config, 'use_grad_checkpoint', False) and self.training:
+                    hidden = torch.utils.checkpoint.checkpoint(block, hidden, use_reentrant=False)
+                else:
+                    hidden = block(hidden)
         else:
             encoded = self.encoder(features) if self.encoder is not None else features
             hidden = self.backbone(encoded)
@@ -377,44 +280,7 @@ def rar_select_points(model: nn.Module, config: TrainingConfig, device: torch.de
     return candidates[top_idx].detach()
 
 
-# ============================================================
-# Optimization Tools
-# ============================================================
-class SoftAdaptWeighter:
-    def __init__(self, names: list[str], beta: float, floor: float, ceil: float) -> None:
-        self.names = names
-        self.beta = beta
-        self.floor = floor
-        self.ceil = ceil
-        self.prev: dict[str, float] | None = None
-
-    def compute(self, current: dict[str, float]) -> dict[str, float]:
-        if self.prev is None:
-            weights = {n: 1.0 for n in self.names}
-        else:
-            rates = np.array([(current[n] - self.prev[n]) / (abs(self.prev[n]) + 1e-8) for n in self.names])
-            shifted = rates - rates.max()
-            exp = np.exp(self.beta * shifted)
-            raw = np.clip(exp / exp.sum() * len(self.names), self.floor, self.ceil)
-            weights = dict(zip(self.names, raw.tolist()))
-        self.prev = dict(current)
-        return weights
-
-
-class EMA:
-    def __init__(self, model: nn.Module, decay: float) -> None:
-        self.decay = decay
-        self.shadow = {k: v.detach().clone() for k, v in unwrap_model(model).state_dict().items()}
-
-    def update(self, model: nn.Module) -> None:
-        for k, v in unwrap_model(model).state_dict().items():
-            if v.dtype.is_floating_point:
-                self.shadow[k].mul_(self.decay).add_(v.detach(), alpha=1 - self.decay)
-            else:
-                self.shadow[k] = v.detach().clone()
-
-    def copy_to(self, model: nn.Module) -> None:
-        unwrap_model(model).load_state_dict(self.shadow, strict=True)
+# SoftAdaptWeighter and EMA are imported from pinn.utils
 
 
 def build_warmup_cosine_lambda(warmup_epochs: int, total_epochs: int, min_lr_ratio: float):
@@ -528,10 +394,18 @@ def train_inversion_model(
     dataset: SyntheticSensorDataset,
     config: TrainingConfig,
     device: torch.device,
+    epochs_override: int | None = None,
 ) -> tuple[nn.Module, list[dict[str, float]]]:
+    epochs = epochs_override if epochs_override is not None else config.epochs
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, build_warmup_cosine_lambda(config.warmup_epochs, config.epochs, config.min_lr_ratio))
-    weighter = SoftAdaptWeighter(['data', 'physics', 'boundary'], config.softadapt_beta, config.softadapt_floor, config.softadapt_ceil)
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, build_warmup_cosine_lambda(config.warmup_epochs, epochs, config.min_lr_ratio))
+    weighter = SoftAdaptWeighter(
+        ['data', 'physics', 'boundary'],
+        config.softadapt_beta,
+        config.softadapt_floor,
+        config.softadapt_ceil,
+        window_size=getattr(config, 'softadapt_window_size', 20)
+    )
     ema = EMA(model, config.ema_decay)
 
     colloc_engine = SobolEngine(dimension=3, scramble=True, seed=config.random_seed)
@@ -543,8 +417,8 @@ def train_inversion_model(
     history: list[dict[str, float]] = []
     adaptive_weights = {'data': 1.0, 'physics': 1.0, 'boundary': 1.0}
 
-    LOGGER.info("Stage 1/2 (AdamW): %d epochs", config.epochs)
-    for epoch in range(1, config.epochs + 1):
+    LOGGER.info("Stage 1/2 (AdamW): %d epochs", epochs)
+    for epoch in range(1, epochs + 1):
         model.train()
         optimizer.zero_grad(set_to_none=True)
 
@@ -607,7 +481,7 @@ def train_inversion_model(
         if epoch > config.rar_warmup_epochs and epoch % config.rar_interval == 0:
             rar_points = rar_select_points(model, config, device, rar_engine)
 
-        if epoch == 1 or epoch % config.log_every == 0 or epoch == config.epochs:
+        if epoch == 1 or epoch % config.log_every == 0 or epoch == epochs:
             LOGGER.info(
                 "Epoch %04d | total_loss=%.6f | val=%.6f | data=%.6f | physics=%.6f | boundary=%.6f",
                 epoch,
