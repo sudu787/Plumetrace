@@ -1,0 +1,21 @@
+Act as an AI Agent Architect. I am building the analytical response automation layer for PlumeTrace. When an air quality sensor records a critical hazard alert, a multi-agent system must intercept the event, dynamically look up local wind conditions, call our AI model, cross-reference local property maps, and auto-draft a legally sound environmental compliance report.
+
+Please write the complete system code inside a file named `agent_orchestrator.py` using LangGraph and LangChain libraries.
+
+1. ARCHITECTURAL DESIGN:
+Implement a StateGraph based on a custom typed state dictionary (`AgentState`). The state dictionary must preserve:
+- sensor_alert_payload: dict (contains sensor_id, latitude, longitude, gas_type, value, timestamp)
+- meteorological_vectors: dict (contains wind_speed, wind_direction, boundary_layer_temp)
+- core_ai_inversion_coordinates: dict (contains predicted source_latitude, source_longitude, confidence_score)
+- target_facility_profile: dict (contains factory_name, corporate_owner, zoning_permit_id, compliance_history)
+- enforcement_report: str (the final regulatory document text)
+
+2. NODE DEFINITIONS (Write python functions for each step):
+- Ingestion & Triaging Node: Parses incoming hazardous events. Validates if levels exceed safe parameters. If safe, ends execution. If dangerous, updates state and routes execution to the weather worker.
+- Meteorological Lookup Node: Uses LLM Tool-Calling. Define an actual LangChain tool function `fetch_current_weather(lat, lon)` that simulates an API call to a meteorological service, returning a structured JSON containing localized wind vectors.
+- AI Execution Bridge Node: Connects the workflow to our inverse-dispersion metrics. For the purpose of the hackathon, write logic that mocks reading PyTorch network metadata, calculating a high-probability source vector located upstream against the current wind direction, and updates `core_ai_inversion_coordinates`.
+- Municipal Registry Search Node: Define a tool function `query_property_records(lat, lon)` that searches a static mock dictionary of industrial plots, matching the coordinates to a real entity (e.g., "Apex Petrochemical Complex", "Global Logistics Foundry") and loads their compliance history.
+- Compliance Report Generation Node: Passes the compiled state details into an OpenAI or Anthropic ChatModel wrapper. Provide a strict system prompt instructing the LLM to write an official, highly authoritative, 3-paragraph regulatory enforcement warning document. The report must cite specific coordinate coordinates, meteorological alignment, and historical infractions.
+
+3. ROUTING & CONTROL FLOW:
+Build the compiled graph with clear directional transitions: Ingestion -> Weather Node -> AI Engine Node -> Registry Node -> Report Generator Node -> END. Include an entry point execution test function at the bottom of the script that initializes the state graph with a mock sensor failure event and executes it using an asynchronous streaming runtime loop, printing the lifecycle changes and the final generated text directly to the console.

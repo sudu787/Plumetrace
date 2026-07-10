@@ -1,0 +1,36 @@
+{
+  "known_source": {
+    "latitude": 40.7138,
+    "longitude": -74.0072
+  },
+  "architecture": "fourier_residual",
+  "raw_pinn_peak": {
+    "latitude": 40.714599609375,
+    "longitude": -74.01177978515625,
+    "probability": 2.3370263036932823e-05,
+    "distance_meters": 396.1046841183654
+  },
+  "fused_physics_pinn_peak": {
+    "latitude": 40.713863372802734,
+    "longitude": -74.00725555419922,
+    "probability": 0.002005470144999816,
+    "distance_meters": 8.460511425071319
+  },
+  "final_losses": {
+    "epoch": 2501.0,
+    "total_loss": 0.023543812334537506,
+    "data_loss": NaN,
+    "physics_loss": NaN,
+    "boundary_loss": NaN,
+    "weight_data": 0.7642506129787023,
+    "weight_physics": 0.13944344547667892,
+    "weight_boundary": 0.016826298644910153,
+    "learning_rate": 0.0,
+    "grad_norm": NaN
+  },
+  "loss_reduction_ratio": 0.00299047615129577,
+  "lbfgs_final_total_loss": 0.023543812334537506,
+  "probability_sum": 1.0000000000000002,
+  "all_probabilities_finite": true,
+  "pass_distance_threshold_250m": true
+}

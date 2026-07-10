@@ -1,0 +1,9 @@
+listeners:
+  default:
+    type: tcp
+    bind: 0.0.0.0:1883
+auth:
+  allow_anonymous: false
+  plugins:
+    - auth_file
+  password-file: passwords.txt
