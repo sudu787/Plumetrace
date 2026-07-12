@@ -306,8 +306,13 @@ def analytic_advection_diffusion_plume(
     initial_spread: float = 0.035,
 ) -> np.ndarray:
     effective_time = np.maximum(t, 0.0) + initial_spread
-    advected_x = source_x + wind_u * t
-    advected_y = source_y + wind_v * t
+
+    # Spatial 2D wind field mapping deflection (sinusoidal street canyon deflection)
+    local_wind_u = wind_u + 0.08 * np.sin(2.0 * math.pi * y)
+    local_wind_v = wind_v + 0.08 * np.cos(2.0 * math.pi * x)
+
+    advected_x = source_x + local_wind_u * t
+    advected_y = source_y + local_wind_v * t
     radial_distance_squared = (x - advected_x) ** 2 + (y - advected_y) ** 2
     denominator = 4.0 * math.pi * diffusion * effective_time
     exponent = -radial_distance_squared / (4.0 * diffusion * effective_time)
@@ -417,6 +422,11 @@ def train_inversion_model(
     history: list[dict[str, float]] = []
     adaptive_weights = {'data': 1.0, 'physics': 1.0, 'boundary': 1.0}
 
+    best_val_loss = float('inf')
+    best_model_state = None
+    patience_counter = 0
+    patience = getattr(config, 'early_stop_patience', 300)
+
     LOGGER.info("Stage 1/2 (AdamW): %d epochs", epochs)
     for epoch in range(1, epochs + 1):
         model.train()
@@ -462,6 +472,17 @@ def train_inversion_model(
                 val_pred = model(dataset.val_features)
                 val_loss_val = float(F.mse_loss(val_pred, dataset.val_concentration).cpu())
 
+            if val_loss_val < best_val_loss:
+                best_val_loss = val_loss_val
+                patience_counter = 0
+                best_model_state = {k: v.cpu().clone() for k, v in unwrap_model(model).state_dict().items()}
+            else:
+                patience_counter += 1
+
+            if patience_counter > patience:
+                LOGGER.info("Early stopping triggered at epoch %d (best val loss: %.6f)", epoch, best_val_loss)
+                break
+
         history.append(
             {
                 'epoch': float(epoch),
@@ -492,6 +513,10 @@ def train_inversion_model(
                 current_losses['boundary'],
             )
 
+    if best_model_state is not None:
+        LOGGER.info("Loading best model weights from epoch with validation loss: %.6f", best_val_loss)
+        unwrap_model(model).load_state_dict(best_model_state)
+
     LOGGER.info("Stage 2/2 (L-BFGS): %d steps", config.lbfgs_steps)
     if not history:
         history.append(
@@ -514,7 +539,7 @@ def train_inversion_model(
         'physics': base_lambdas['physics'] * adaptive_weights['physics'],
         'boundary': base_lambdas['boundary'] * adaptive_weights['boundary'],
     }
-    lbfgs = torch.optim.LBFGS(model.parameters(), lr=config.lbfgs_lr, max_iter=config.lbfgs_steps, line_search_fn='strong_wolfe')
+    lbfgs = torch.optim.LBFGS(unwrap_model(model).parameters(), lr=config.lbfgs_lr, max_iter=config.lbfgs_steps, line_search_fn='strong_wolfe')
     lbfgs_fixed_collocation = sample_collocation_points(config.collocation_points, device, colloc_engine)
     lbfgs_fixed_boundary = sample_boundary_points(config.boundary_points, device, bound_engine)
 

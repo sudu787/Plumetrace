@@ -9,9 +9,21 @@ import Map, {
   Source,
   MapRef
 } from "react-map-gl/maplibre";
-import { Factory, Radio, Wind } from "lucide-react";
+import { Factory, Radio, Wind, Play, Pause, RotateCcw, History } from "lucide-react";
 import type { Feature, FeatureCollection, LineString, Point, Polygon } from "geojson";
 import type { StyleSpecification } from "maplibre-gl";
+import { SENSOR_REGISTRY, type SensorNode } from "../constants/sensorRegistry";
+import {
+  SO2_SAFE_LIMIT,
+  PM25_SAFE_LIMIT,
+  isCritical,
+  normalizeTelemetry,
+  buildPlumeFeature,
+  offsetCoordinate,
+  type FactoryFacility,
+  type TelemetryReading,
+  type HazardEvent
+} from "../utils/snappingUtils";
 
 const MAPBOX_DARK_STYLE = "mapbox://styles/mapbox/dark-v11";
 const MAPBOX_TOKEN = process.env.NEXT_PUBLIC_MAPBOX_ACCESS_TOKEN?.trim() ?? "";
@@ -19,7 +31,7 @@ const HAS_MAPBOX_TOKEN = MAPBOX_TOKEN.length > 0;
 const API_BASE_URL = (
   process.env.NEXT_PUBLIC_API_BASE_URL ||
   process.env.NEXT_PUBLIC_BACKEND_URL ||
-  "http://localhost:8000"
+  "http://127.0.0.1:8000"
 ).replace(/\/$/, "");
 const SSE_URL = `${API_BASE_URL}/api/stream`;
 const TOKENLESS_DARK_STYLE: StyleSpecification = {
@@ -47,78 +59,6 @@ const TOKENLESS_DARK_STYLE: StyleSpecification = {
     }
   ]
 };
-const SO2_SAFE_LIMIT = 75;
-const PM25_SAFE_LIMIT = 35;
-
-interface FactoryFacility {
-  factory_name: string;
-  corporate_owner: string;
-  zoning_permit_id: string;
-  latitude: number;
-  longitude: number;
-  plot_radius_km: number;
-}
-
-const REGISTRY_FACTORIES: FactoryFacility[] = [
-  {
-    factory_name: "Apex Petrochemical Complex",
-    corporate_owner: "Apex Industrial Holdings LLC",
-    zoning_permit_id: "MUNI-IZ-2044-APX-17",
-    latitude: 40.71345,
-    longitude: -74.00765,
-    plot_radius_km: 0.42
-  },
-  {
-    factory_name: "Global Logistics Foundry",
-    corporate_owner: "Harborline Materials Group",
-    zoning_permit_id: "MUNI-IZ-2041-GLF-09",
-    latitude: 40.71610,
-    longitude: -74.00280,
-    plot_radius_km: 0.36
-  },
-  {
-    factory_name: "Northbank Solvents Terminal",
-    corporate_owner: "CivicChem Transport Partners",
-    zoning_permit_id: "MUNI-IZ-2039-NST-22",
-    latitude: 40.71020,
-    longitude: -74.01160,
-    plot_radius_km: 0.31
-  }
-];
-
-export interface TelemetryReading {
-  id?: string;
-  sensor_id: string;
-  timestamp: string;
-  latitude: number;
-  longitude: number;
-  pm25: number;
-  so2: number;
-  wind_speed: number;
-  wind_direction: number;
-}
-
-interface SensorNode {
-  sensor_id: string;
-  label: string;
-  latitude: number;
-  longitude: number;
-  pm25: number;
-  so2: number;
-  wind_speed: number;
-  wind_direction: number;
-  timestamp: string;
-}
-
-export interface HazardEvent {
-  reading: TelemetryReading;
-  suspectedSource: {
-    latitude: number;
-    longitude: number;
-    confidence: number;
-  };
-  plume: Feature<Polygon>;
-}
 
 export interface AttributionSource {
   latitude: number;
@@ -132,306 +72,6 @@ interface MapEngineProps {
   onHazard?: (event: HazardEvent) => void;
   onConnectionStateChange?: (state: "connecting" | "online" | "offline") => void;
   onEnforcementReport?: (reportData: any) => void;
-}
-
-const SENSOR_REGISTRY: SensorNode[] = [
-  {
-    sensor_id: "industrial_north",
-    label: "Industrial North",
-    latitude: 40.718,
-    longitude: -74.006,
-    pm25: 0,
-    so2: 0,
-    wind_speed: 0,
-    wind_direction: 0,
-    timestamp: ""
-  },
-  {
-    sensor_id: "residential_east",
-    label: "Residential East",
-    latitude: 40.714,
-    longitude: -73.998,
-    pm25: 0,
-    so2: 0,
-    wind_speed: 0,
-    wind_direction: 0,
-    timestamp: ""
-  },
-  {
-    sensor_id: "park_south",
-    label: "Park South",
-    latitude: 40.708,
-    longitude: -74.004,
-    pm25: 0,
-    so2: 0,
-    wind_speed: 0,
-    wind_direction: 0,
-    timestamp: ""
-  },
-  {
-    sensor_id: "river_west",
-    label: "River West",
-    latitude: 40.712,
-    longitude: -74.012,
-    pm25: 0,
-    so2: 0,
-    wind_speed: 0,
-    wind_direction: 0,
-    timestamp: ""
-  },
-  {
-    sensor_id: "downtown_center",
-    label: "Downtown Center",
-    latitude: 40.713,
-    longitude: -74.008,
-    pm25: 0,
-    so2: 0,
-    wind_speed: 0,
-    wind_direction: 0,
-    timestamp: ""
-  },
-  {
-    sensor_id: "commercial_northeast",
-    label: "Commercial Northeast",
-    latitude: 40.716,
-    longitude: -74.002,
-    pm25: 0,
-    so2: 0,
-    wind_speed: 0,
-    wind_direction: 0,
-    timestamp: ""
-  },
-  {
-    sensor_id: "highway_southeast",
-    label: "Highway Southeast",
-    latitude: 40.710,
-    longitude: -74.000,
-    pm25: 0,
-    so2: 0,
-    wind_speed: 0,
-    wind_direction: 0,
-    timestamp: ""
-  },
-  {
-    sensor_id: "suburban_southwest",
-    label: "Suburban Southwest",
-    latitude: 40.709,
-    longitude: -74.010,
-    pm25: 0,
-    so2: 0,
-    wind_speed: 0,
-    wind_direction: 0,
-    timestamp: ""
-  }
-];
-
-function isCritical(reading: Pick<TelemetryReading, "so2" | "pm25">): boolean {
-  return reading.so2 >= SO2_SAFE_LIMIT || reading.pm25 >= PM25_SAFE_LIMIT;
-}
-
-function toFiniteNumber(value: unknown, fallback = 0): number {
-  const numeric = typeof value === "number" ? value : Number(value);
-  return Number.isFinite(numeric) ? numeric : fallback;
-}
-
-function normalizeTelemetry(payload: unknown): TelemetryReading | null {
-  if (typeof payload !== "object" || payload === null) {
-    return null;
-  }
-
-  const candidate = payload as Partial<TelemetryReading>;
-  if (!candidate.sensor_id) {
-    return null;
-  }
-
-  return {
-    id: candidate.id,
-    sensor_id: String(candidate.sensor_id),
-    timestamp: candidate.timestamp ? String(candidate.timestamp) : new Date().toISOString(),
-    latitude: toFiniteNumber(candidate.latitude),
-    longitude: toFiniteNumber(candidate.longitude),
-    pm25: toFiniteNumber(candidate.pm25),
-    so2: toFiniteNumber(candidate.so2),
-    wind_speed: toFiniteNumber(candidate.wind_speed),
-    wind_direction: toFiniteNumber(candidate.wind_direction)
-  };
-}
-
-function offsetCoordinate(latitude: number, longitude: number, bearingDegrees: number, distanceKm: number) {
-  const bearing = (bearingDegrees * Math.PI) / 180;
-  const deltaNorthKm = Math.cos(bearing) * distanceKm;
-  const deltaEastKm = Math.sin(bearing) * distanceKm;
-  const nextLatitude = latitude + deltaNorthKm / 111;
-  const nextLongitude = longitude + deltaEastKm / (111 * Math.cos((latitude * Math.PI) / 180));
-
-  return {
-    latitude: nextLatitude,
-    longitude: nextLongitude
-  };
-}
-
-function getBearing(lat1: number, lon1: number, lat2: number, lon2: number) {
-  const dLon = ((lon2 - lon1) * Math.PI) / 180;
-  const lat1Rad = (lat1 * Math.PI) / 180;
-  const lat2Rad = (lat2 * Math.PI) / 180;
-  const y = Math.sin(dLon) * Math.cos(lat2Rad);
-  const x = Math.cos(lat1Rad) * Math.sin(lat2Rad) - Math.sin(lat1Rad) * Math.cos(lat2Rad) * Math.cos(dLon);
-  const brng = (Math.atan2(y, x) * 180) / Math.PI;
-  return (brng + 360) % 360;
-}
-
-function snapToNearestFactory(
-  latitude: number,
-  longitude: number,
-  windDirection?: number,
-  sensorLat?: number,
-  sensorLon?: number
-) {
-  let bestFac = REGISTRY_FACTORIES[0];
-
-  if (windDirection !== undefined && sensorLat !== undefined && sensorLon !== undefined) {
-    let bestScore = -Infinity;
-    const upstreamBearing = windDirection % 360;
-    const severityFactor = 1.0;
-    const plumeLengthKm = 0.48 + severityFactor * 0.22;
-    const rawSource = offsetCoordinate(sensorLat, sensorLon, upstreamBearing, plumeLengthKm);
-
-    REGISTRY_FACTORIES.forEach((fac) => {
-      // Physical distance from sensor to factory
-      const distToSensor = Math.sqrt(Math.pow(fac.latitude - sensorLat, 2) + Math.pow(fac.longitude - sensorLon, 2)) * 111;
-      
-      // If the factory is within 150 meters, it is the direct candidate!
-      if (distToSensor < 0.15) {
-        bestFac = fac;
-        bestScore = 99999;
-        return;
-      }
-
-      // Distance from raw offset to factory
-      const distToOffset = Math.sqrt(Math.pow(fac.latitude - rawSource.latitude, 2) + Math.pow(fac.longitude - rawSource.longitude, 2)) * 111;
-      
-      // Bearing alignment (factory to sensor should match downwind direction)
-      const facToSensorBearing = getBearing(fac.latitude, fac.longitude, sensorLat, sensorLon);
-      const downwindBearing = (windDirection + 180) % 360;
-      let angleDiff = Math.abs(facToSensorBearing - downwindBearing);
-      if (angleDiff > 180) angleDiff = 360 - angleDiff;
-
-      // Penalize angle mismatch and offset distance
-      const score = -(angleDiff * 8) - (distToOffset * 50);
-      if (score > bestScore) {
-        bestScore = score;
-        bestFac = fac;
-      }
-    });
-  } else {
-    // Normal haversine/Euclidean snap (for post-attribution PINN output)
-    let minDistance = Infinity;
-    REGISTRY_FACTORIES.forEach((fac) => {
-      const d = Math.pow(fac.latitude - latitude, 2) + Math.pow(fac.longitude - longitude, 2);
-      if (d < minDistance) {
-        minDistance = d;
-        bestFac = fac;
-      }
-    });
-  }
-
-  return {
-    latitude: bestFac.latitude,
-    longitude: bestFac.longitude
-  };
-}
-
-function buildPlumeFeature(
-  reading: TelemetryReading,
-  pulseScale: number,
-  customSource?: { latitude: number; longitude: number; confidence?: number } | null
-): {
-  polygon: Feature<Polygon>;
-  centerline: Feature<LineString>;
-  origin: Feature<Point>;
-  suspectedSource: HazardEvent["suspectedSource"];
-} {
-  const severityFactor = Math.min(2.4, Math.max(reading.so2 / SO2_SAFE_LIMIT, reading.pm25 / PM25_SAFE_LIMIT, 1));
-  const plumeLengthKm = 0.48 + severityFactor * 0.22;
-  const plumeWidthKm = (0.12 + severityFactor * 0.04) * pulseScale;
-  const upstreamBearing = reading.wind_direction % 360;
-
-  let sourceCoord;
-  if (customSource) {
-    sourceCoord = snapToNearestFactory(customSource.latitude, customSource.longitude);
-  } else {
-    sourceCoord = snapToNearestFactory(
-      reading.latitude,
-      reading.longitude,
-      reading.wind_direction,
-      reading.latitude,
-      reading.longitude
-    );
-  }
-
-  const left = offsetCoordinate(sourceCoord.latitude, sourceCoord.longitude, upstreamBearing - 90, plumeWidthKm);
-  const right = offsetCoordinate(sourceCoord.latitude, sourceCoord.longitude, upstreamBearing + 90, plumeWidthKm);
-  const sensorLeft = offsetCoordinate(reading.latitude, reading.longitude, upstreamBearing - 90, plumeWidthKm * 0.18);
-  const sensorRight = offsetCoordinate(reading.latitude, reading.longitude, upstreamBearing + 90, plumeWidthKm * 0.18);
-
-  const polygon: Feature<Polygon> = {
-    type: "Feature",
-    properties: {
-      sensor_id: reading.sensor_id,
-      so2: reading.so2,
-      pm25: reading.pm25,
-      pulseScale
-    },
-    geometry: {
-      type: "Polygon",
-      coordinates: [
-        [
-          [sensorLeft.longitude, sensorLeft.latitude],
-          [left.longitude, left.latitude],
-          [sourceCoord.longitude, sourceCoord.latitude],
-          [right.longitude, right.latitude],
-          [sensorRight.longitude, sensorRight.latitude],
-          [sensorLeft.longitude, sensorLeft.latitude]
-        ]
-      ]
-    }
-  };
-
-  const centerline: Feature<LineString> = {
-    type: "Feature",
-    properties: {
-      sensor_id: reading.sensor_id
-    },
-    geometry: {
-      type: "LineString",
-      coordinates: [
-        [reading.longitude, reading.latitude],
-        [sourceCoord.longitude, sourceCoord.latitude]
-      ]
-    }
-  };
-
-  const origin: Feature<Point> = {
-    type: "Feature",
-    properties: {
-      sensor_id: reading.sensor_id
-    },
-    geometry: {
-      type: "Point",
-      coordinates: [sourceCoord.longitude, sourceCoord.latitude]
-    }
-  };
-
-  return {
-    polygon,
-    centerline,
-    origin,
-    suspectedSource: {
-      latitude: sourceCoord.latitude,
-      longitude: sourceCoord.longitude,
-      confidence: customSource && customSource.confidence !== undefined ? customSource.confidence : Math.min(0.97, 0.61 + severityFactor * 0.12)
-    }
-  };
 }
 
 function SensorMarker({ node, selected }: { node: SensorNode; selected: boolean }) {
@@ -499,11 +139,90 @@ function SourceMarker() {
 
 export default function MapEngine({ attributedSource, onTelemetry, onHazard, onConnectionStateChange, onEnforcementReport }: MapEngineProps) {
   const mapRef = useRef<MapRef>(null);
+  const [registryFactories, setRegistryFactories] = useState<FactoryFacility[]>([]);
+  const registryFactoriesRef = useRef<FactoryFacility[]>([]);
+
+  // Simulator States
+  const [isSimulating, setIsSimulating] = useState(false);
+  const [simulatedPlume, setSimulatedPlume] = useState<FeatureCollection | null>(null);
+  const [simOrigin, setSimOrigin] = useState<{ latitude: number; longitude: number } | null>(null);
+  
+  const [simFactoryName, setSimFactoryName] = useState("");
+  const [simWindDirection, setSimWindDirection] = useState(270);
+  const [simWindSpeed, setSimWindSpeed] = useState(5.0);
+  const [simPollutant, setSimPollutant] = useState<"SO2" | "PM25">("SO2");
+  const [simIntensity, setSimIntensity] = useState(150);
+
+  useEffect(() => {
+    fetch(`${API_BASE_URL}/api/v1/factories`)
+      .then((res) => res.json())
+      .then((data) => {
+        setRegistryFactories(data);
+        registryFactoriesRef.current = data;
+        if (data.length > 0) {
+          setSimFactoryName(data[0].factory_name);
+        }
+      })
+      .catch((err) => console.error("Failed to load factory registry", err));
+  }, []);
+
   const [sensorMap, setSensorMap] = useState<Record<string, SensorNode>>(() =>
     Object.fromEntries(SENSOR_REGISTRY.map((node) => [node.sensor_id, node]))
   );
   const [selectedSensorId, setSelectedSensorId] = useState<string | null>(SENSOR_REGISTRY[0]?.sensor_id ?? null);
   const [latestHazardReading, setLatestHazardReading] = useState<TelemetryReading | null>(null);
+
+  const [isReplayMode, setIsReplayMode] = useState(false);
+  const [replayHistory, setReplayHistory] = useState<TelemetryReading[]>([]);
+  const [replayIndex, setReplayIndex] = useState(0);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false);
+
+  // Playback loop
+  useEffect(() => {
+    let timer: NodeJS.Timeout | null = null;
+    if (isPlaying && isReplayMode && replayHistory.length > 0) {
+      timer = setInterval(() => {
+        setReplayIndex((prev) => {
+          if (prev >= replayHistory.length - 1) {
+            setIsPlaying(false);
+            return prev;
+          }
+          return prev + 1;
+        });
+      }, 1000);
+    }
+    return () => {
+      if (timer) clearInterval(timer);
+    };
+  }, [isPlaying, isReplayMode, replayHistory]);
+
+  const enterReplayMode = useCallback(async () => {
+    if (replayHistory.length > 0) {
+      setIsReplayMode(true);
+      return;
+    }
+    setIsLoadingHistory(true);
+    try {
+      const apiKey = process.env.NEXT_PUBLIC_API_KEY || "dev-insecure-key";
+      const response = await fetch(`${API_BASE_URL}/api/v1/sensors/history?api_key=${apiKey}`);
+      if (!response.ok) throw new Error("History API failed");
+      const rawData = await response.json();
+      const history = rawData
+        .map((r: any) => normalizeTelemetry(r))
+        .filter(Boolean)
+        .reverse() as TelemetryReading[];
+      setReplayHistory(history);
+      if (history.length > 0) {
+        setReplayIndex(history.length - 1);
+      }
+      setIsReplayMode(true);
+    } catch (err) {
+      console.error("Failed to load sensor history", err);
+    } finally {
+      setIsLoadingHistory(false);
+    }
+  }, [replayHistory]);
 
   const fitToPlume = useCallback((sensorLat: number, sensorLon: number, sourceLat: number, sourceLon: number) => {
     if (!mapRef.current) return;
@@ -523,11 +242,11 @@ export default function MapEngine({ attributedSource, onTelemetry, onHazard, onC
   }, []);
 
   useEffect(() => {
-    if (latestHazardReading) {
-      const source = attributedSource || buildPlumeFeature(latestHazardReading, 1, null).suspectedSource;
+    if (latestHazardReading && !isReplayMode) {
+      const source = attributedSource || buildPlumeFeature(registryFactories, latestHazardReading, 1, null).suspectedSource;
       fitToPlume(latestHazardReading.latitude, latestHazardReading.longitude, source.latitude, source.longitude);
     }
-  }, [latestHazardReading, attributedSource, fitToPlume]);
+  }, [latestHazardReading, attributedSource, fitToPlume, isReplayMode, registryFactories]);
 
   useEffect(() => {
     onConnectionStateChange?.("connecting");
@@ -573,7 +292,7 @@ export default function MapEngine({ attributedSource, onTelemetry, onHazard, onC
           onTelemetry?.(reading, severity);
 
           if (severity === "critical") {
-            const plume = buildPlumeFeature(reading, 1);
+            const plume = buildPlumeFeature(registryFactoriesRef.current, reading, 1);
             setLatestHazardReading(reading);
             onHazard?.({
               reading,
@@ -596,23 +315,64 @@ export default function MapEngine({ attributedSource, onTelemetry, onHazard, onC
     };
   }, [onConnectionStateChange, onHazard, onTelemetry]);
 
-  const sensors = useMemo(() => Object.values(sensorMap), [sensorMap]);
-  const selectedSensor = selectedSensorId ? sensorMap[selectedSensorId] : null;
+  // Reconstruct sensor states up to replayIndex in replay mode
+  const currentSensorMap = useMemo(() => {
+    if (!isReplayMode || replayHistory.length === 0) return sensorMap;
+
+    const baseMap = Object.fromEntries(
+      SENSOR_REGISTRY.map((node) => [
+        node.sensor_id,
+        { ...node, pm25: 0, so2: 0, wind_speed: 0, wind_direction: 0, timestamp: "" }
+      ])
+    );
+
+    for (let i = 0; i <= replayIndex; i++) {
+      const reading = replayHistory[i];
+      if (baseMap[reading.sensor_id]) {
+        baseMap[reading.sensor_id] = {
+          ...baseMap[reading.sensor_id],
+          pm25: reading.pm25,
+          so2: reading.so2,
+          wind_speed: reading.wind_speed,
+          wind_direction: reading.wind_direction,
+          timestamp: reading.timestamp
+        };
+      }
+    }
+    return baseMap;
+  }, [isReplayMode, replayHistory, replayIndex, sensorMap]);
+
+  const sensors = useMemo(() => Object.values(currentSensorMap), [currentSensorMap]);
+  const selectedSensor = selectedSensorId ? currentSensorMap[selectedSensorId] : null;
+
+  // Resolve the active hazard reading for drawing plumes
+  const activeHazardReading = useMemo(() => {
+    if (!isReplayMode) return latestHazardReading;
+
+    // Find the most recent critical reading up to replayIndex
+    for (let i = replayIndex; i >= 0; i--) {
+      const r = replayHistory[i];
+      if (r.so2 >= SO2_SAFE_LIMIT || r.pm25 >= PM25_SAFE_LIMIT) {
+        return r;
+      }
+    }
+    return null;
+  }, [isReplayMode, replayHistory, replayIndex, latestHazardReading]);
 
   const plumeData = useMemo<FeatureCollection>(() => {
-    if (!latestHazardReading) {
+    if (!activeHazardReading) {
       return {
         type: "FeatureCollection",
         features: []
       };
     }
 
-    const plume = buildPlumeFeature(latestHazardReading, 1.1, attributedSource);
+    const plume = buildPlumeFeature(registryFactories, activeHazardReading, 1.1, attributedSource);
     return {
       type: "FeatureCollection",
       features: [plume.polygon, plume.centerline, plume.origin]
     };
-  }, [latestHazardReading, attributedSource]);
+  }, [activeHazardReading, attributedSource, registryFactories]);
 
   const heatmapData = useMemo<FeatureCollection<Point>>(
     () => ({
@@ -634,11 +394,51 @@ export default function MapEngine({ attributedSource, onTelemetry, onHazard, onC
   );
 
   const plumeOrigin = useMemo(() => {
-    if (!latestHazardReading) {
+    if (!activeHazardReading) {
       return null;
     }
-    return buildPlumeFeature(latestHazardReading, 1, attributedSource).suspectedSource;
-  }, [attributedSource, latestHazardReading]);
+    return buildPlumeFeature(registryFactories, activeHazardReading, 1, attributedSource).suspectedSource;
+  }, [attributedSource, activeHazardReading, registryFactories]);
+
+  const runSimulation = useCallback(() => {
+    const selectedFac = registryFactories.find((f) => f.factory_name === simFactoryName);
+    if (!selectedFac) return;
+
+    const downwindBearing = (simWindDirection + 180) % 360;
+    const plumeLengthKm = 0.45 + (simIntensity / 100) * 0.15;
+    const mockSensorCoord = offsetCoordinate(
+      selectedFac.latitude,
+      selectedFac.longitude,
+      downwindBearing,
+      plumeLengthKm
+    );
+
+    const simReading: TelemetryReading = {
+      sensor_id: "SIM_DOWNWIND",
+      timestamp: new Date().toISOString(),
+      latitude: mockSensorCoord.latitude,
+      longitude: mockSensorCoord.longitude,
+      pm25: simPollutant === "PM25" ? simIntensity : 0,
+      so2: simPollutant === "SO2" ? simIntensity : 0,
+      wind_speed: simWindSpeed,
+      wind_direction: simWindDirection,
+    };
+
+    const pulseScale = 1.0;
+    const plumeData = buildPlumeFeature(registryFactories, simReading, pulseScale, {
+      latitude: selectedFac.latitude,
+      longitude: selectedFac.longitude,
+      confidence: 1.0,
+    });
+
+    const featureCol: FeatureCollection = {
+      type: "FeatureCollection",
+      features: [plumeData.polygon],
+    };
+
+    setSimulatedPlume(featureCol);
+    setSimOrigin({ latitude: selectedFac.latitude, longitude: selectedFac.longitude });
+  }, [registryFactories, simFactoryName, simWindDirection, simWindSpeed, simPollutant, simIntensity]);
 
   const handleMarkerClick = useCallback((sensorId: string) => {
     setSelectedSensorId(sensorId);
@@ -663,55 +463,73 @@ export default function MapEngine({ attributedSource, onTelemetry, onHazard, onC
       >
         <NavigationControl position="top-right" visualizePitch />
 
-        <Source id="plumetrace-hazard-heatmap" type="geojson" data={heatmapData}>
-          <Layer
-            id="hazard-heatmap-layer"
-            type="heatmap"
-            paint={{
-              "heatmap-weight": ["interpolate", ["linear"], ["get", "intensity"], 0, 0, 1, 0.55, 3, 1],
-              "heatmap-intensity": 1.2,
-              "heatmap-radius": ["interpolate", ["linear"], ["zoom"], 11, 24, 15, 62],
-              "heatmap-opacity": 0.48,
-              "heatmap-color": [
-                "interpolate",
-                ["linear"],
-                ["heatmap-density"],
-                0,
-                "rgba(16,185,129,0)",
-                0.25,
-                "rgba(16,185,129,0.28)",
-                0.55,
-                "rgba(251,191,36,0.48)",
-                0.82,
-                "rgba(244,63,94,0.62)",
-                1,
-                "rgba(127,29,29,0.82)"
-              ]
-            }}
-          />
-        </Source>
+        {!isSimulating && (
+          <>
+            <Source id="plumetrace-hazard-heatmap" type="geojson" data={heatmapData}>
+              <Layer
+                id="hazard-heatmap-layer"
+                type="heatmap"
+                paint={{
+                  "heatmap-weight": ["interpolate", ["linear"], ["get", "intensity"], 0, 0, 1, 0.55, 3, 1],
+                  "heatmap-intensity": 1.2,
+                  "heatmap-radius": ["interpolate", ["linear"], ["zoom"], 11, 24, 15, 62],
+                  "heatmap-opacity": 0.48,
+                  "heatmap-color": [
+                    "interpolate",
+                    ["linear"],
+                    ["heatmap-density"],
+                    0,
+                    "rgba(16,185,129,0)",
+                    0.25,
+                    "rgba(16,185,129,0.28)",
+                    0.55,
+                    "rgba(251,191,36,0.48)",
+                    0.82,
+                    "rgba(244,63,94,0.62)",
+                    1,
+                    "rgba(127,29,29,0.82)"
+                  ]
+                }}
+              />
+            </Source>
 
-        <Source id="plumetrace-plume-source" type="geojson" data={plumeData}>
-          <Layer
-            id="plume-fill-layer"
-            type="fill"
-            filter={["==", ["geometry-type"], "Polygon"]}
-            paint={{
-              "fill-color": "rgba(248,113,113,0.46)",
-              "fill-opacity": ["interpolate", ["linear"], ["get", "pulseScale"], 1, 0.28, 1.42, 0.12]
-            }}
-          />
-          <Layer
-            id="plume-centerline-layer"
-            type="line"
-            filter={["==", ["geometry-type"], "LineString"]}
-            paint={{
-              "line-color": "rgba(254,202,202,0.95)",
-              "line-width": 2,
-              "line-dasharray": [2, 1.2]
-            }}
-          />
-        </Source>
+            <Source id="plumetrace-plume-source" type="geojson" data={plumeData}>
+              <Layer
+                id="plume-fill-layer"
+                type="fill"
+                filter={["==", ["geometry-type"], "Polygon"]}
+                paint={{
+                  "fill-color": "rgba(248,113,113,0.46)",
+                  "fill-opacity": ["interpolate", ["linear"], ["get", "pulseScale"], 1, 0.28, 1.42, 0.12]
+                }}
+              />
+              <Layer
+                id="plume-centerline-layer"
+                type="line"
+                filter={["==", ["geometry-type"], "LineString"]}
+                paint={{
+                  "line-color": "rgba(254,202,202,0.95)",
+                  "line-width": 2,
+                  "line-dasharray": [2, 1.2]
+                }}
+              />
+            </Source>
+          </>
+        )}
+
+        {isSimulating && simulatedPlume && (
+          <Source id="simulated-plume-source" type="geojson" data={simulatedPlume}>
+            <Layer
+              id="simulated-plume-layer"
+              type="fill"
+              filter={["==", ["geometry-type"], "Polygon"]}
+              paint={{
+                "fill-color": "rgba(6,182,212,0.48)",
+                "fill-outline-color": "rgba(34,211,238,0.9)"
+              }}
+            />
+          </Source>
+        )}
 
         {sensors.map((sensor) => (
           <Marker
@@ -728,7 +546,7 @@ export default function MapEngine({ attributedSource, onTelemetry, onHazard, onC
           </Marker>
         ))}
 
-        {REGISTRY_FACTORIES.map((fac) => {
+        {registryFactories.map((fac) => {
           const isActive = plumeOrigin && 
             Math.abs(fac.latitude - plumeOrigin.latitude) < 0.0001 && 
             Math.abs(fac.longitude - plumeOrigin.longitude) < 0.0001;
@@ -737,21 +555,63 @@ export default function MapEngine({ attributedSource, onTelemetry, onHazard, onC
 
           return (
             <Marker key={fac.factory_name} latitude={fac.latitude} longitude={fac.longitude} anchor="center">
-              <div
-                title={`${fac.factory_name} (${fac.corporate_owner})`}
-                className="flex h-8 w-8 items-center justify-center rounded-full border border-slate-800 bg-slate-950/80 text-slate-400 hover:text-cyan-300 hover:border-cyan-500/50 shadow-lg backdrop-blur opacity-65 hover:opacity-100 hover:scale-105 transition-all cursor-pointer"
-              >
-                <Factory className="h-4 w-4" />
+              <div className="flex flex-col items-center justify-center pointer-events-none group">
+                <div
+                  title={`${fac.factory_name} (${fac.corporate_owner})`}
+                  className="flex h-8 w-8 items-center justify-center rounded-full border border-slate-800 bg-slate-950/80 text-slate-400 hover:text-cyan-300 hover:border-cyan-500/50 shadow-lg backdrop-blur opacity-65 group-hover:opacity-100 group-hover:scale-105 transition-all cursor-pointer pointer-events-auto"
+                >
+                  <Factory className="h-4 w-4" />
+                </div>
+                <span className="mt-1 px-1.5 py-0.5 rounded bg-slate-950/90 border border-slate-800/40 text-[9px] font-medium text-slate-400 shadow-md backdrop-blur select-none group-hover:text-cyan-300 group-hover:border-cyan-500/30 transition-all">
+                  {fac.factory_name.replace(" Petrochemical Complex", "").replace(" Solvents Terminal", "").replace(" Logistics Foundry", "")}
+                </span>
               </div>
             </Marker>
           );
         })}
 
-        {plumeOrigin ? (
+        {!isSimulating && plumeOrigin ? (
           <Marker latitude={plumeOrigin.latitude} longitude={plumeOrigin.longitude} anchor="center">
-            <SourceMarker />
+            <div className="flex flex-col items-center justify-center">
+              <SourceMarker />
+              {(() => {
+                const fac = registryFactories.find(f => 
+                  Math.abs(f.latitude - plumeOrigin.latitude) < 0.0001 && 
+                  Math.abs(f.longitude - plumeOrigin.longitude) < 0.0001
+                );
+                return fac ? (
+                  <span className="mt-1.5 px-2 py-0.5 rounded bg-rose-950/95 border border-rose-500/30 text-[9px] font-bold text-rose-300 shadow-lg shadow-rose-950/50 backdrop-blur select-none animate-pulse">
+                    {fac.factory_name}
+                  </span>
+                ) : null;
+              })()}
+            </div>
           </Marker>
         ) : null}
+
+        {isSimulating && simOrigin && (
+          <Marker latitude={simOrigin.latitude} longitude={simOrigin.longitude} anchor="center">
+            <div className="flex flex-col items-center justify-center">
+              <div className="source-marker-shell relative flex h-16 w-16 items-center justify-center">
+                <span className="source-marker-wave absolute h-16 w-16 rounded-full border border-cyan-200/45 animate-ping" />
+                <div className="source-marker-core flex h-12 w-12 items-center justify-center rounded-full border border-cyan-300/70 bg-cyan-950/85 text-cyan-100 shadow-[0_0_15px_rgba(6,182,212,0.7)] backdrop-blur">
+                  <Factory className="h-5 w-5" />
+                </div>
+              </div>
+              {(() => {
+                const fac = registryFactories.find(f => 
+                  Math.abs(f.latitude - simOrigin.latitude) < 0.0001 && 
+                  Math.abs(f.longitude - simOrigin.longitude) < 0.0001
+                );
+                return fac ? (
+                  <span className="mt-1.5 px-2 py-0.5 rounded bg-cyan-950/95 border border-cyan-500/30 text-[9px] font-bold text-cyan-300 shadow-lg shadow-cyan-950/50 backdrop-blur select-none animate-pulse">
+                    {fac.factory_name}
+                  </span>
+                ) : null;
+              })()}
+            </div>
+          </Marker>
+        )}
 
         {selectedSensor ? (
           <Popup
@@ -761,6 +621,7 @@ export default function MapEngine({ attributedSource, onTelemetry, onHazard, onC
             closeButton={false}
             offset={28}
             onClose={() => setSelectedSensorId(null)}
+            maxWidth="none"
           >
             <div className="w-72 p-4">
               <div className="flex items-start justify-between gap-4">
@@ -807,6 +668,232 @@ export default function MapEngine({ attributedSource, onTelemetry, onHazard, onC
           </div>
         ) : null}
       </div>
+
+      {/* Replay Controls Panel */}
+      <div className="absolute inset-x-5 bottom-5 z-20 flex flex-col gap-3 rounded-xl border border-slate-800/80 bg-slate-950/85 p-4 shadow-2xl backdrop-blur-xl transition-all duration-300">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => {
+                if (isReplayMode) {
+                  setIsReplayMode(false);
+                  setIsPlaying(false);
+                } else {
+                  enterReplayMode();
+                }
+              }}
+              className={`flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs font-semibold uppercase tracking-wider transition-all duration-300 border pointer-events-auto cursor-pointer ${
+                isReplayMode
+                  ? "bg-cyan-500/20 border-cyan-400/50 text-cyan-300 shadow-md shadow-cyan-950/20"
+                  : "bg-slate-900 border-slate-800 text-slate-400 hover:text-white hover:border-slate-700"
+              }`}
+            >
+              <History className="h-3.5 w-3.5" />
+              {isReplayMode ? "Replay Mode" : "Go to Replay"}
+            </button>
+            <button
+              onClick={() => {
+                setIsSimulating((prev) => !prev);
+                if (!isSimulating) {
+                  setIsReplayMode(false);
+                  setIsPlaying(false);
+                } else {
+                  setSimulatedPlume(null);
+                  setSimOrigin(null);
+                }
+              }}
+              className={`flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs font-semibold uppercase tracking-wider transition-all duration-300 border pointer-events-auto cursor-pointer ${
+                isSimulating
+                  ? "bg-cyan-500/20 border-cyan-400/50 text-cyan-300 shadow-md shadow-cyan-950/20"
+                  : "bg-slate-900 border-slate-800 text-slate-400 hover:text-white hover:border-slate-700"
+              }`}
+            >
+              <Radio className="h-3.5 w-3.5" />
+              {isSimulating ? "Simulator Mode" : "Scenario Simulator"}
+            </button>
+            <div className="h-4 w-[1px] bg-slate-800" />
+            <span className="text-[11px] font-medium uppercase tracking-widest text-slate-500">
+              {isReplayMode ? "Historical playback" : "Monitoring Live Stream"}
+            </span>
+          </div>
+
+          {isReplayMode && replayHistory.length > 0 && (
+            <div className="flex items-center gap-2 pointer-events-auto">
+              <button
+                onClick={() => setIsPlaying(!isPlaying)}
+                className="flex h-8 w-8 items-center justify-center rounded-lg border border-slate-800 bg-slate-900 hover:bg-slate-800 text-white transition-all cursor-pointer"
+              >
+                {isPlaying ? <Pause className="h-4 w-4 text-cyan-300" /> : <Play className="h-4 w-4" />}
+              </button>
+              <button
+                onClick={() => {
+                  setReplayIndex(0);
+                  setIsPlaying(false);
+                }}
+                className="flex h-8 w-8 items-center justify-center rounded-lg border border-slate-800 bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-white transition-all cursor-pointer"
+                title="Reset Replay"
+              >
+                <RotateCcw className="h-3.5 w-3.5" />
+              </button>
+              <span className="text-xs font-mono text-slate-400 px-2 py-1 bg-slate-900/50 border border-slate-800/40 rounded">
+                {replayHistory[replayIndex]?.timestamp ? new Date(replayHistory[replayIndex].timestamp).toLocaleTimeString() : "--"}
+              </span>
+            </div>
+          )}
+        </div>
+
+        {isReplayMode && (
+          <div className="mt-2 flex flex-col gap-2 pointer-events-auto">
+            {isLoadingHistory ? (
+              <div className="text-center py-2 text-xs text-slate-500 animate-pulse">
+                Loading compliance history database...
+              </div>
+            ) : replayHistory.length === 0 ? (
+              <div className="text-center py-2 text-xs text-slate-500">
+                No telemetry history found on backend.
+              </div>
+            ) : (
+              <div className="flex items-center gap-4">
+                <input
+                  type="range"
+                  min="0"
+                  max={replayHistory.length - 1}
+                  value={replayIndex}
+                  onChange={(e) => {
+                    setReplayIndex(Number(e.target.value));
+                    setIsPlaying(false);
+                  }}
+                  className="h-1.5 w-full cursor-pointer rounded-lg bg-slate-800 accent-cyan-400 outline-none transition-all hover:bg-slate-700"
+                />
+                <span className="text-[10px] font-mono text-slate-500 whitespace-nowrap">
+                  {replayIndex + 1} / {replayHistory.length}
+                </span>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Scenario Simulator panel overlay */}
+      {isSimulating && (
+        <div className="absolute right-5 top-20 z-20 w-80 rounded-xl border border-slate-800/80 bg-slate-950/85 p-5 shadow-2xl backdrop-blur-xl pointer-events-auto flex flex-col gap-4 text-white">
+          <div>
+            <h3 className="text-xs font-semibold uppercase tracking-[0.2em] text-cyan-300">Scenario Simulator</h3>
+            <p className="mt-1 text-[11px] text-slate-400">Mock a leak at any industrial facility to preview plume dispersion.</p>
+          </div>
+
+          <div className="flex flex-col gap-3">
+            <div className="flex flex-col gap-1.5">
+              <label className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Select Facility</label>
+              <select
+                value={simFactoryName}
+                onChange={(e) => setSimFactoryName(e.target.value)}
+                className="w-full rounded border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-slate-100 focus:border-cyan-500/50 focus:outline-none cursor-pointer"
+              >
+                {registryFactories.map((fac) => (
+                  <option key={fac.factory_name} value={fac.factory_name}>
+                    {fac.factory_name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="flex flex-col gap-1.5">
+              <div className="flex justify-between">
+                <label className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Wind Direction</label>
+                <span className="text-[11px] font-bold text-cyan-300">{simWindDirection}°</span>
+              </div>
+              <input
+                type="range"
+                min="0"
+                max="359"
+                value={simWindDirection}
+                onChange={(e) => setSimWindDirection(Number(e.target.value))}
+                className="w-full accent-cyan-400 cursor-pointer bg-slate-800 h-1.5 rounded-lg appearance-none"
+              />
+            </div>
+
+            <div className="flex flex-col gap-1.5">
+              <div className="flex justify-between">
+                <label className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Wind Speed</label>
+                <span className="text-[11px] font-bold text-cyan-300">{simWindSpeed.toFixed(1)} m/s</span>
+              </div>
+              <input
+                type="range"
+                min="1"
+                max="15"
+                step="0.5"
+                value={simWindSpeed}
+                onChange={(e) => setSimWindSpeed(Number(e.target.value))}
+                className="w-full accent-cyan-400 cursor-pointer bg-slate-800 h-1.5 rounded-lg appearance-none"
+              />
+            </div>
+
+            <div className="flex flex-col gap-1.5">
+              <label className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Pollutant Type</label>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setSimPollutant("SO2")}
+                  className={`flex-1 rounded border py-1.5 text-xs font-semibold cursor-pointer transition ${
+                    simPollutant === "SO2"
+                      ? "bg-cyan-500/20 border-cyan-400/50 text-cyan-300"
+                      : "bg-slate-900 border-slate-800 text-slate-400 hover:text-white"
+                  }`}
+                >
+                  SO2
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSimPollutant("PM25")}
+                  className={`flex-1 rounded border py-1.5 text-xs font-semibold cursor-pointer transition ${
+                    simPollutant === "PM25"
+                      ? "bg-cyan-500/20 border-cyan-400/50 text-cyan-300"
+                      : "bg-slate-900 border-slate-800 text-slate-400 hover:text-white"
+                  }`}
+                >
+                  PM2.5
+                </button>
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-1.5">
+              <div className="flex justify-between">
+                <label className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Leak Intensity</label>
+                <span className="text-[11px] font-bold text-cyan-300">{simIntensity} {simPollutant === "SO2" ? "ppb" : "ug/m³"}</span>
+              </div>
+              <input
+                type="range"
+                min="50"
+                max="500"
+                value={simIntensity}
+                onChange={(e) => setSimIntensity(Number(e.target.value))}
+                className="w-full accent-cyan-400 cursor-pointer bg-slate-800 h-1.5 rounded-lg appearance-none"
+              />
+            </div>
+          </div>
+
+          <div className="mt-2 flex gap-3">
+            <button
+              type="button"
+              onClick={runSimulation}
+              className="flex-1 rounded-lg bg-cyan-500 px-4 py-2 text-xs font-bold text-slate-950 hover:bg-cyan-400 transition cursor-pointer"
+            >
+              Simulate Leak
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setSimulatedPlume(null);
+                setSimOrigin(null);
+              }}
+              className="rounded-lg bg-slate-900 border border-slate-800 px-4 py-2 text-xs font-semibold text-slate-300 hover:text-white hover:border-slate-700 transition cursor-pointer"
+            >
+              Reset
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

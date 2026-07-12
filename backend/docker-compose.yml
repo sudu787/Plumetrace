@@ -11,13 +11,40 @@ services:
     volumes:
       - mosquitto_data:/mosquitto/data
       - mosquitto_log:/mosquitto/log
-    healthcheck:
-      test: ["CMD-SHELL", "mosquitto_pub -h localhost -t plumetrace/health -m ok >/dev/null 2>&1"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 5s
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: plumetrace-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - MQTT_BROKER_HOST=mosquitto
+      - MQTT_BROKER_PORT=1883
+      - DATABASE_URL=sqlite+aiosqlite:////data/plumetrace.db
+    volumes:
+      - backend_db:/data
+    depends_on:
+      - mosquitto
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+  mock-sensors:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: plumetrace-mock-sensors
+    restart: unless-stopped
+    environment:
+      - MQTT_BROKER_HOST=mosquitto
+      - MQTT_BROKER_PORT=1883
+      - SENSOR_COUNT=8
+    depends_on:
+      - mosquitto
+    command: python mock_sensors.py
 
 volumes:
   mosquitto_data:
   mosquitto_log:
+  backend_db:

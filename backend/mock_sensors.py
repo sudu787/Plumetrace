@@ -75,12 +75,24 @@ def build_reading(sensor: SensorStation, sequence: int) -> dict[str, float | str
     
     # Specific stations get hit by the plume spike
     if spike_window:
-        if SENSOR_COUNT == 4 and sensor["sensor_id"] == "park_south":
+        # Cycle through different sensors for each spike window to detect different factories
+        target_idx = (sequence // 30) % SENSOR_COUNT
+        target_sensor_id = SENSOR_STATIONS[target_idx]["sensor_id"]
+        
+        # In 8-sensor mode, also spike an adjacent sensor to simulate a wider plume
+        target_idx_2 = (target_idx + 1) % SENSOR_COUNT if SENSOR_COUNT == 8 else target_idx
+        target_sensor_id_2 = SENSOR_STATIONS[target_idx_2]["sensor_id"]
+        
+        if sensor["sensor_id"] in (target_sensor_id, target_sensor_id_2):
             so2 = 185.0
             pm25 = 65.0
-        elif SENSOR_COUNT == 8 and sensor["sensor_id"] in ("park_south", "downtown_center"):
-            so2 = 185.0
-            pm25 = 65.0
+
+    import math
+    drift = 8.0 * math.sin(sequence / 12.0)
+    # Add a small spatial variation unique to each sensor (e.g. +/- 4 degrees)
+    sensor_hash = sum(ord(c) for c in sensor["sensor_id"])
+    spatial_offset = (sensor_hash % 9) - 4
+    wind_direction = round((290.0 + drift + spatial_offset) % 360, 1)
 
     return {
         "sensor_id": sensor["sensor_id"],
@@ -90,7 +102,7 @@ def build_reading(sensor: SensorStation, sequence: int) -> dict[str, float | str
         "pm25": round(pm25, 2),
         "so2": round(so2, 2),
         "wind_speed": round(random.uniform(7.0, 8.5), 2),
-        "wind_direction": 290.0,
+        "wind_direction": wind_direction,
     }
 
 

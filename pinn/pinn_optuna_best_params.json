@@ -1,0 +1,7 @@
+{
+  "hidden_layers": 10,
+  "hidden_units": 256,
+  "fourier_bands": 8,
+  "fourier_sigma": 5.30163943981149,
+  "learning_rate": 0.0004778653465217372
+}

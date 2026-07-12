@@ -113,15 +113,18 @@ class DraftReviewRequest(BaseModel):
         str_strip_whitespace=True,
     )
 
-    status: StrictStr = Field(..., description="Must be 'approved' or 'rejected'")
+    status: StrictStr = Field(..., description="Must be 'approved', 'rejected', or 'refine'")
     reviewer_id: StrictStr = Field(..., description="Identifier of the human reviewer")
     report_text: StrictStr | None = Field(
         default=None, description="Optional edited report text to save upon approval"
+    )
+    feedback: StrictStr | None = Field(
+        default=None, description="Optional revision feedback if requesting refinement"
     )
 
     @field_validator("status")
     @classmethod
     def validate_status(cls, v: str) -> str:
-        if v not in ("approved", "rejected"):
-            raise ValueError("status must be 'approved' or 'rejected'")
+        if v not in ("approved", "rejected", "refine"):
+            raise ValueError("status must be 'approved', 'rejected', or 'refine'")
         return v

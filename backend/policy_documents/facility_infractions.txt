@@ -1,0 +1,29 @@
+[Facility Infractions Profile - Apex Petrochemical Complex]
+Zoning ID: MUNI-IZ-2044-APX-17
+History:
+- 2024-04-18: Notice of Violation (NOV) issued for sulfur scrubber bypass reporting lapse.
+- 2025-09-03: Administrative warning issued for delayed continuous emissions monitor (CEMS) calibration.
+- 2026-02-11: Corrective action plan accepted for flare-stack exceedance logging.
+
+[Facility Infractions Profile - Global Logistics Foundry]
+Zoning ID: MUNI-IZ-2041-GLF-09
+History:
+- 2024-12-07: Odor complaint investigation closed with no exceedance detected.
+- 2025-06-21: Minor particulate handling deficiency corrected on site during inspection.
+
+[Facility Infractions Profile - Northbank Solvents Terminal]
+Zoning ID: MUNI-IZ-2039-NST-22
+History:
+- 2023-11-19: Spill prevention plan revision ordered.
+- 2025-01-29: Volatile organic compound (VOC) inspection passed.
+
+[Facility Infractions Profile - Eastside Manufacturing Plant]
+Zoning ID: MUNI-IZ-2055-EMP-10
+History:
+- 2024-05-12: Routine environmental inspection passed.
+
+[Facility Infractions Profile - Riverside Chemical Works]
+Zoning ID: MUNI-IZ-2060-RCW-05
+History:
+- 2025-08-11: Warning issued for improper hazardous waste storage.
+- 2026-01-20: Fine issued for unauthorized emissions during startup.

@@ -37,7 +37,7 @@ interface AgentResponse {
 const API_BASE_URL = (
   process.env.NEXT_PUBLIC_API_BASE_URL ||
   process.env.NEXT_PUBLIC_BACKEND_URL ||
-  "http://localhost:8000"
+  "http://127.0.0.1:8000"
 ).replace(/\/$/, "");
 const ORCHESTRATOR_ENDPOINT =
   process.env.NEXT_PUBLIC_AGENT_ORCHESTRATOR_URL || `${API_BASE_URL}/api/v1/agent/orchestrate`;
@@ -80,6 +80,7 @@ export default function SidebarLogs({ logs, latestHazard, onAttributionComplete,
   const [localDraftId, setLocalDraftId] = useState<string | null>(null);
   const [localReviewStatus, setLocalReviewStatus] = useState<string | null>(null);
   const [isReviewing, setIsReviewing] = useState(false);
+  const [feedback, setFeedback] = useState("");
 
   useEffect(() => {
     if (externalReport) {
@@ -170,6 +171,31 @@ export default function SidebarLogs({ logs, latestHazard, onAttributionComplete,
       setIsReviewing(false);
     }
   }, [localDraftId, report]);
+
+  const refineReview = useCallback(async () => {
+    if (!localDraftId || !feedback.trim()) return;
+    setIsReviewing(true);
+    setError("");
+    try {
+      const apiKey = process.env.NEXT_PUBLIC_API_KEY || "dev-insecure-key";
+      const response = await fetch(`${API_BASE_URL}/api/v1/drafts/${localDraftId}/review`, {
+        method: "POST",
+        headers: { 
+          "Content-Type": "application/json",
+          "X-API-Key": apiKey 
+        },
+        body: JSON.stringify({ status: "refine", reviewer_id: "operator_01", feedback: feedback })
+      });
+      if (!response.ok) throw new Error("Failed to submit refinement request");
+      const data = await response.json();
+      setReport(data.report_text);
+      setFeedback("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Refinement request failed");
+    } finally {
+      setIsReviewing(false);
+    }
+  }, [localDraftId, feedback]);
 
   const exportReport = useCallback(() => {
     if (!report) {
@@ -300,16 +326,35 @@ export default function SidebarLogs({ logs, latestHazard, onAttributionComplete,
                     <button
                       onClick={() => submitReview("approved")}
                       disabled={isReviewing}
-                      className="flex-1 rounded-md bg-emerald-500/20 px-3 py-2 text-xs font-semibold text-emerald-300 border border-emerald-500/30 hover:bg-emerald-500/30 transition disabled:opacity-50"
+                      className="flex-1 rounded-md bg-emerald-500/20 px-3 py-2 text-xs font-semibold text-emerald-300 border border-emerald-500/30 hover:bg-emerald-500/30 transition disabled:opacity-50 cursor-pointer"
                     >
                       {isReviewing ? "Submitting..." : "Approve & Dispatch"}
                     </button>
                     <button
                       onClick={() => submitReview("rejected")}
                       disabled={isReviewing}
-                      className="flex-1 rounded-md bg-rose-500/20 px-3 py-2 text-xs font-semibold text-rose-300 border border-rose-500/30 hover:bg-rose-500/30 transition disabled:opacity-50"
+                      className="flex-1 rounded-md bg-rose-500/20 px-3 py-2 text-xs font-semibold text-rose-300 border border-rose-500/30 hover:bg-rose-500/30 transition disabled:opacity-50 cursor-pointer"
                     >
                       Reject Draft
+                    </button>
+                  </div>
+                  
+                  {/* Refinement input controls */}
+                  <div className="mt-4 flex flex-col gap-2 border-t border-slate-800/60 pt-3">
+                    <input
+                      type="text"
+                      placeholder="Revision instructions (e.g. Cite Clean Air Act)"
+                      value={feedback}
+                      onChange={(e) => setFeedback(e.target.value)}
+                      className="w-full bg-slate-950/65 border border-slate-800 rounded px-2.5 py-1.5 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-cyan-500/50"
+                      disabled={isReviewing}
+                    />
+                    <button
+                      onClick={refineReview}
+                      disabled={isReviewing || !feedback.trim()}
+                      className="w-full rounded-md bg-cyan-500/20 px-3 py-1.5 text-xs font-semibold text-cyan-300 border border-cyan-500/30 hover:bg-cyan-500/30 transition disabled:opacity-50 cursor-pointer"
+                    >
+                      {isReviewing ? "Refining..." : "Request Refinements"}
                     </button>
                   </div>
                 </div>

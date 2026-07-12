@@ -1,0 +1,11 @@
+[Municipal Zoning Ordinance Section 204-IZ - Industrial Zoning Limits]
+Establishes the municipal boundaries and air quality requirements for industrial facilities.
+Under Section 204-IZ, the maximum allowable concentrations at the property line of any industrial complex are:
+- Sulfur Dioxide (SO2): 75.0 ppb (parts per billion) averaged over 1 hour.
+- Fine Particulate Matter (PM2.5): 35.0 ug/m3 (micrograms per cubic meter) over 24 hours.
+Any exceedance recorded by municipal sensor nodes surrounding a facility plot constitutes a zoning violation.
+Upon detection of critical exceedances:
+- The city must issue an immediate enforcement warning.
+- The facility is legally required to implement a data-hold order on all emissions data, process logs, and maintenance logs.
+- Field verification teams must be dispatched to coordinates for site audits.
+- Corporate owners must submit a corrective action plan within 10 business days of notification.

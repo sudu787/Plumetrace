@@ -1,0 +1,929 @@
+"""
+PlumeTrace physics-informed neural network engine.
+
+This script is a self-contained hackathon demo for inverse-dispersion source
+attribution. It trains a Physics-Informed Neural Network (PINN) to reconstruct
+the origin of a pollutant plume using sparse measurements from four municipal
+IoT sensors and a physics loss derived from the 2D advection-diffusion PDE.
+
+Mathematical model
+------------------
+The pollutant concentration C(x, y, t) is governed by:
+
+    dC/dt + u * dC/dx + v * dC/dy - D * (d2C/dx2 + d2C/dy2) = 0
+
+The neural network approximates C(x, y, t). During training, the data loss fits
+sparse sensor readings while the physics loss penalizes PDE residual error over
+Sobol collocation points. The architecture uses advanced Fourier Residual blocks
+and two-stage AdamW + L-BFGS optimization.
+"""
+
+from __future__ import annotations
+
+import argparse
+import logging
+import math
+import random
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Literal
+
+import numpy as np
+
+try:
+    import torch
+    from torch import Tensor, nn
+    from torch.nn import functional as F
+    from torch.quasirandom import SobolEngine
+except ImportError as exc:
+    raise SystemExit(
+        "PyTorch is required to run pinn_engine.py. Install it with the "
+        "appropriate command from https://pytorch.org/get-started/locally/."
+    ) from exc
+
+
+LOGGER = logging.getLogger("plumetrace.pinn")
+
+
+from pinn.config import SensorStation, CitySector, ModelConfig, TrainingConfig, SENSOR_STATIONS, SECTOR, FactorySource, CANDIDATE_FACTORIES
+from pinn.utils import (
+    seed_everything as set_reproducibility,
+    get_device,
+    configure_logging,
+    lat_lon_to_normalized as _lat_lon_to_normalized,
+    normalized_to_lat_lon as _normalized_to_lat_lon,
+    EMA,
+    SoftAdaptWeighter
+)
+
+
+@dataclass
+class SyntheticSensorDataset:
+    """Tensor and metadata bundle for sparse sensor observations."""
+    features: Tensor
+    concentration: Tensor
+    concentration_scale_ppb: float
+    rows: list[dict[str, Any]]
+    val_features: Tensor | None = None
+    val_concentration: Tensor | None = None
+    # Multi-source candidate attribution metadata (normalized x/y for every
+    # known candidate facility, and which of them are actively emitting in
+    # this synthetic scenario).
+    candidate_x: Tensor | None = None
+    candidate_y: Tensor | None = None
+    active_indices: tuple[int, ...] = ()
+    # Convenience accessors for the (first) active source, kept for backward
+    # compatibility with cells that inspect a single "known source".
+    source_x: float | None = None
+    source_y: float | None = None
+
+
+@dataclass
+class SourceProbabilityMap:
+    """Dense latitude, longitude, and normalized source probability matrices."""
+    latitudes: np.ndarray
+    longitudes: np.ndarray
+    probabilities: np.ndarray
+
+
+def lat_lon_to_normalized(
+    latitude: float | np.ndarray,
+    longitude: float | np.ndarray,
+    sector: CitySector,
+) -> tuple[np.ndarray, np.ndarray]:
+    return _lat_lon_to_normalized(latitude, longitude, sector.lat_min, sector.lat_max, sector.lon_min, sector.lon_max)
+
+
+def normalized_to_lat_lon(
+    x: np.ndarray,
+    y: np.ndarray,
+    sector: CitySector,
+) -> tuple[np.ndarray, np.ndarray]:
+    return _normalized_to_lat_lon(x, y, sector.lat_min, sector.lat_max, sector.lon_min, sector.lon_max)
+
+
+# ============================================================
+# Architecture factory
+# ============================================================
+class FourierFeatures(nn.Module):
+    def __init__(self, in_dim: int, num_bands: int, sigma: float, seed: int = 0) -> None:
+        super().__init__()
+        generator = torch.Generator().manual_seed(seed)
+        b_matrix = torch.randn((in_dim, num_bands), generator=generator) * sigma
+        self.register_buffer('b_matrix', b_matrix)
+
+    def forward(self, x: Tensor) -> Tensor:
+        projected = 2.0 * math.pi * (x @ self.b_matrix)
+        return torch.cat([torch.sin(projected), torch.cos(projected)], dim=-1)
+
+
+class AdaptiveSwish(nn.Module):
+    def __init__(self, num_features: int) -> None:
+        super().__init__()
+        self.beta = nn.Parameter(torch.ones(num_features))
+
+    def forward(self, x: Tensor) -> Tensor:
+        return x * torch.sigmoid(self.beta * x)
+
+
+class ResidualBlock(nn.Module):
+    def __init__(self, width: int, use_adaptive_activation: bool) -> None:
+        super().__init__()
+        self.linear1 = nn.Linear(width, width)
+        self.linear2 = nn.Linear(width, width)
+        self.act1 = AdaptiveSwish(width) if use_adaptive_activation else nn.Tanh()
+        self.act2 = AdaptiveSwish(width) if use_adaptive_activation else nn.Tanh()
+        self.layer_norm1 = nn.LayerNorm(width)
+        self.layer_norm2 = nn.LayerNorm(width)
+
+    def forward(self, x: Tensor) -> Tensor:
+        h = self.act1(self.linear1(self.layer_norm1(x)))
+        h = self.linear2(self.layer_norm2(h))
+        return self.act2(h + x)
+
+
+class SineLayer(nn.Module):
+    def __init__(self, in_features: int, out_features: int, omega0: float, is_first: bool) -> None:
+        super().__init__()
+        self.omega0 = omega0
+        self.linear = nn.Linear(in_features, out_features)
+        with torch.no_grad():
+            bound = (1.0 / in_features) if is_first else (math.sqrt(6.0 / in_features) / omega0)
+            self.linear.weight.uniform_(-bound, bound)
+            nn.init.zeros_(self.linear.bias)
+
+    def forward(self, x: Tensor) -> Tensor:
+        return torch.sin(self.omega0 * self.linear(x))
+
+
+class PlumeInversionPINN(nn.Module):
+    def __init__(self, model_config: ModelConfig) -> None:
+        super().__init__()
+        self.config = model_config
+        arch = model_config.arch_type
+        in_dim = 3
+
+        if arch == 'fourier_residual':
+            self.encoder: nn.Module | None = FourierFeatures(in_dim, model_config.fourier_bands, model_config.fourier_sigma)
+            feat_dim = 2 * model_config.fourier_bands
+        else:
+            self.encoder = None
+            feat_dim = in_dim
+
+        if arch == 'siren':
+            n_hidden = max(model_config.hidden_layers - 1, 1)
+            siren_layers = [SineLayer(in_dim, model_config.hidden_units, model_config.siren_omega0_first, is_first=True)]
+            siren_layers += [
+                SineLayer(model_config.hidden_units, model_config.hidden_units, model_config.siren_omega0_hidden, is_first=False)
+                for _ in range(n_hidden)
+            ]
+            self.backbone: nn.Module = nn.Sequential(*siren_layers)
+            self.blocks = None
+            out_width = model_config.hidden_units
+        elif arch in ('residual', 'fourier_residual'):
+            self.input_proj = nn.Linear(feat_dim, model_config.hidden_units)
+            self.input_act = AdaptiveSwish(model_config.hidden_units) if model_config.use_adaptive_activation else nn.Tanh()
+            n_blocks = max(model_config.hidden_layers, 1)
+            self.blocks = nn.ModuleList(
+                [ResidualBlock(model_config.hidden_units, model_config.use_adaptive_activation) for _ in range(n_blocks)]
+            )
+            out_width = model_config.hidden_units
+        else:
+            layers: list[nn.Module] = []
+            width = feat_dim
+            for _ in range(model_config.hidden_layers):
+                layers.append(nn.Linear(width, model_config.hidden_units))
+                layers.append(AdaptiveSwish(model_config.hidden_units) if model_config.use_adaptive_activation else nn.Tanh())
+                width = model_config.hidden_units
+            self.backbone = nn.Sequential(*layers)
+            self.blocks = None
+            out_width = model_config.hidden_units
+
+        self.output_layer = nn.Linear(out_width, 1)
+        self._initialize_weights()
+        if self.output_layer.bias is not None:
+            nn.init.constant_(self.output_layer.bias, -5.0)
+
+    def _initialize_weights(self) -> None:
+        skip_ids = set()
+        if self.config.arch_type == 'siren':
+            for module in self.backbone:
+                skip_ids.add(id(module.linear))
+        for module in self.modules():
+            if isinstance(module, nn.Linear) and id(module) not in skip_ids:
+                nn.init.xavier_uniform_(module.weight)
+                nn.init.zeros_(module.bias)
+
+    def forward(self, x: Tensor, y: Tensor | None = None, t: Tensor | None = None) -> Tensor:
+        if y is None and t is None:
+            features = x
+        elif y is not None and t is not None:
+            features = torch.cat((x, y, t), dim=1)
+        else:
+            raise ValueError("Provide either a single feature tensor or all x, y, t tensors.")
+
+        if features.ndim != 2 or features.shape[1] != 3:
+            raise ValueError("Model input must have shape [batch, 3]")
+        arch = self.config.arch_type
+        if arch == 'siren':
+            hidden = self.backbone(features)
+        elif arch in ('residual', 'fourier_residual'):
+            encoded = self.encoder(features) if self.encoder is not None else features
+            hidden = self.input_act(self.input_proj(encoded))
+            for block in self.blocks:
+                if getattr(self.config, 'use_grad_checkpoint', False) and self.training:
+                    hidden = torch.utils.checkpoint.checkpoint(block, hidden, use_reentrant=False)
+                else:
+                    hidden = block(hidden)
+        else:
+            encoded = self.encoder(features) if self.encoder is not None else features
+            hidden = self.backbone(encoded)
+        return F.softplus(self.output_layer(hidden), beta=1.0)
+
+
+def unwrap_model(model: nn.Module) -> nn.Module:
+    return model.module if isinstance(model, nn.DataParallel) else model
+
+
+# ============================================================
+# Physics residual
+# ============================================================
+def compute_pde_residual(
+    features: Tensor, model: nn.Module, u: float, v: float, diffusion: float, reduction: Literal['mean', 'none'] = 'mean', create_graph: bool = True
+) -> Tensor:
+    features = features.clone().requires_grad_(True)
+    concentration = model(features)
+    ones = torch.ones_like(concentration)
+    # First-order grads must always keep a graph (create_graph=True) since the
+    # Laplacian terms below differentiate them a second time -- this is independent
+    # of whether the caller wants the *final* residual to stay graph-connected.
+    # `create_graph` only governs the second-order calls (i.e. whether the residual
+    # itself can be backpropagated into the model's parameters afterwards).
+    gradients = torch.autograd.grad(concentration, features, grad_outputs=ones, create_graph=True, retain_graph=True)[0]
+    dC_dx, dC_dy, dC_dt = gradients[:, 0:1], gradients[:, 1:2], gradients[:, 2:3]
+    d2C_dx2 = torch.autograd.grad(dC_dx, features, grad_outputs=torch.ones_like(dC_dx), create_graph=create_graph, retain_graph=True)[0][:, 0:1]
+    d2C_dy2 = torch.autograd.grad(dC_dy, features, grad_outputs=torch.ones_like(dC_dy), create_graph=create_graph, retain_graph=create_graph)[0][:, 1:2]
+    residual = dC_dt + u * dC_dx + v * dC_dy - diffusion * (d2C_dx2 + d2C_dy2)
+    squared = residual.square()
+    return squared.mean() if reduction == 'mean' else squared
+
+
+# ============================================================
+# Samplers (Sobol)
+# ============================================================
+def sample_collocation_points(count: int, device: torch.device, engine: SobolEngine) -> Tensor:
+    return engine.draw(count).to(device=device, dtype=torch.float32)
+
+def sample_boundary_points(count: int, device: torch.device, engine: SobolEngine) -> Tensor:
+    n = max(count // 4, 1)
+    free = engine.draw(n * 2).to(device=device, dtype=torch.float32)
+    t, other = free[:n, 0:1], free[n:, 0:1]
+    side0 = torch.cat([torch.zeros((n, 1), device=device), other, t], dim=1)
+    side1 = torch.cat([torch.ones((n, 1), device=device), other, t], dim=1)
+    side2 = torch.cat([other, torch.zeros((n, 1), device=device), t], dim=1)
+    side3 = torch.cat([other, torch.ones((n, 1), device=device), t], dim=1)
+    return torch.cat([side0, side1, side2, side3], dim=0)
+
+def rar_select_points(model: nn.Module, config: TrainingConfig, device: torch.device, engine: SobolEngine) -> Tensor:
+    pool_size = config.collocation_points * config.rar_pool_multiplier
+    candidates = engine.draw(pool_size).to(device=device, dtype=torch.float32)
+    with torch.enable_grad():
+        residuals = compute_pde_residual(candidates, model, config.wind_u, config.wind_v, config.diffusion, reduction='none', create_graph=False).detach()
+    top_k = max(int(config.collocation_points * config.rar_fraction), 1)
+    top_idx = torch.topk(residuals.squeeze(-1), k=min(top_k, pool_size), largest=True).indices
+    return candidates[top_idx].detach()
+
+
+# SoftAdaptWeighter and EMA are imported from pinn.utils
+
+
+def build_warmup_cosine_lambda(warmup_epochs: int, total_epochs: int, min_lr_ratio: float):
+    def fn(epoch: int) -> float:
+        if epoch < warmup_epochs:
+            return (epoch + 1) / max(1, warmup_epochs)
+        progress = (epoch - warmup_epochs) / max(1, total_epochs - warmup_epochs)
+        cosine = 0.5 * (1.0 + math.cos(math.pi * min(progress, 1.0)))
+        return min_lr_ratio + (1.0 - min_lr_ratio) * cosine
+    return fn
+
+
+def analytic_advection_diffusion_plume(
+    x: np.ndarray,
+    y: np.ndarray,
+    t: np.ndarray,
+    source_x: float,
+    source_y: float,
+    wind_u: float,
+    wind_v: float,
+    diffusion: float,
+    source_strength: float = 1.0,
+    initial_spread: float = 0.035,
+) -> np.ndarray:
+    effective_time = np.maximum(t, 0.0) + initial_spread
+    advected_x = source_x + wind_u * t
+    advected_y = source_y + wind_v * t
+    radial_distance_squared = (x - advected_x) ** 2 + (y - advected_y) ** 2
+    denominator = 4.0 * math.pi * diffusion * effective_time
+    exponent = -radial_distance_squared / (4.0 * diffusion * effective_time)
+    return source_strength * np.exp(exponent) / denominator
+
+
+def analytic_multi_source_plume(
+    x: np.ndarray,
+    y: np.ndarray,
+    t: np.ndarray,
+    sources: list[tuple[float, float, float]],
+    wind_u: float,
+    wind_v: float,
+    diffusion: float,
+    initial_spread: float = 0.035,
+) -> np.ndarray:
+    """Superpose contributions from multiple point sources.
+
+    The 2D advection-diffusion PDE is linear, so the concentration field from
+    several simultaneously-active sources is exactly the sum of each
+    source's individual analytic solution. `sources` is a list of
+    (source_x, source_y, source_strength) tuples for the *active* candidates
+    only -- inactive candidate facilities simply aren't included.
+    """
+    total = 0.0
+    for source_x, source_y, source_strength in sources:
+        total = total + analytic_advection_diffusion_plume(
+            x, y, t, source_x, source_y, wind_u, wind_v, diffusion,
+            source_strength=source_strength, initial_spread=initial_spread,
+        )
+    return total
+
+
+def generate_synthetic_sensor_data(
+    sector: CitySector,
+    config: TrainingConfig,
+    device: torch.device,
+    candidates: tuple[FactorySource, ...] = CANDIDATE_FACTORIES,
+) -> SyntheticSensorDataset:
+    # Normalize every known candidate facility location once.
+    candidate_xy: list[tuple[float, float]] = []
+    for facility in candidates:
+        fx_arr, fy_arr = lat_lon_to_normalized(facility.latitude, facility.longitude, sector)
+        candidate_xy.append((float(np.asarray(fx_arr)), float(np.asarray(fy_arr))))
+
+    active_indices = tuple(config.active_source_indices)
+    if not active_indices:
+        raise ValueError("config.active_source_indices must contain at least one candidate index")
+
+    active_sources = [
+        (candidate_xy[i][0], candidate_xy[i][1], candidates[i].source_strength)
+        for i in active_indices
+    ]
+    # Kept for backward-compatible single-source consumers (e.g. checkpoint metadata).
+    source_x, source_y = candidate_xy[active_indices[0]][0], candidate_xy[active_indices[0]][1]
+
+    rows: list[dict[str, Any]] = []
+    x_values: list[float] = []
+    y_values: list[float] = []
+    t_values: list[float] = []
+    plume_signal_values: list[float] = []
+
+    sample_times = np.linspace(0.05, 1.0, config.sensor_time_samples, dtype=np.float32)
+    for sensor in SENSOR_STATIONS:
+        sensor_x, sensor_y = lat_lon_to_normalized(sensor.latitude, sensor.longitude, sector)
+        sx = float(np.asarray(sensor_x))
+        sy = float(np.asarray(sensor_y))
+
+        for timestamp in sample_times:
+            signal = analytic_multi_source_plume(
+                np.asarray(sx, dtype=np.float32),
+                np.asarray(sy, dtype=np.float32),
+                np.asarray(float(timestamp), dtype=np.float32),
+                active_sources,
+                config.wind_u,
+                config.wind_v,
+                config.diffusion,
+            )
+            x_values.append(sx)
+            y_values.append(sy)
+            t_values.append(float(timestamp))
+            plume_signal_values.append(float(signal))
+
+    plume = np.asarray(plume_signal_values, dtype=np.float32)
+    normalized_signal = plume / max(float(plume.max()), 1.0e-8)
+    background_so2_ppb = 7.5
+    event_scale_ppb = 180.0
+    noise = np.random.normal(loc=0.0, scale=1.65, size=normalized_signal.shape)
+    so2_ppb = np.clip(background_so2_ppb + event_scale_ppb * normalized_signal + noise, 0.0, None)
+    concentration_scale_ppb = float(np.max(so2_ppb))
+    target = (so2_ppb / concentration_scale_ppb).astype(np.float32)
+
+    for i, (x, y, t, so2, c) in enumerate(zip(x_values, y_values, t_values, so2_ppb, target)):
+        sensor = SENSOR_STATIONS[i // config.sensor_time_samples]
+        rows.append({
+            'sensor_id': sensor.sensor_id,
+            'latitude': sensor.latitude,
+            'longitude': sensor.longitude,
+            'x': float(x),
+            'y': float(y),
+            'elapsed_time': float(t),
+            'so2_ppb': float(so2),
+            'normalized_concentration': float(c),
+        })
+
+    features = torch.tensor(np.column_stack([x_values, y_values, t_values]), dtype=torch.float32, device=device)
+    concentration = torch.tensor(target, dtype=torch.float32, device=device).view(-1, 1)
+
+    indices = torch.randperm(len(features))
+    split_idx = int(len(features) * 0.8)
+    train_idx, val_idx = indices[:split_idx], indices[split_idx:]
+
+    val_features = features[val_idx]
+    val_concentration = concentration[val_idx]
+    features = features[train_idx]
+    concentration = concentration[train_idx]
+
+    candidate_x = torch.tensor([c[0] for c in candidate_xy], dtype=torch.float32, device=device)
+    candidate_y = torch.tensor([c[1] for c in candidate_xy], dtype=torch.float32, device=device)
+
+    LOGGER.info(
+        "Generated %d train, %d val synthetic readings from %d sensors | %d candidate facilities, active=%s",
+        len(train_idx), len(val_idx), len(SENSOR_STATIONS), len(candidates),
+        [candidates[i].display_name for i in active_indices],
+    )
+    return SyntheticSensorDataset(
+        features, concentration, concentration_scale_ppb, rows, val_features, val_concentration,
+        candidate_x=candidate_x, candidate_y=candidate_y, active_indices=active_indices,
+        source_x=source_x, source_y=source_y,
+    )
+
+
+def compute_source_prior_loss(
+    model: nn.Module,
+    candidate_x: Tensor,
+    candidate_y: Tensor,
+    active_indices: tuple[int, ...],
+    device: torch.device,
+) -> Tensor:
+    """Soft classification prior over the known candidate facilities.
+
+    Rather than asking the network to localize a source anywhere in the
+    sector, this scores the model's predicted t=0 concentration at each
+    *named* candidate location and pushes probability mass (via softmax)
+    onto whichever candidates are actually active. This is what gives
+    per-facility attribution ("Northbank Solvents Terminal: 0.82") instead
+    of only a dense, unlabeled probability heatmap.
+    """
+    num_candidates = candidate_x.shape[0]
+    t_zero = torch.zeros_like(candidate_x)
+    candidate_features = torch.stack([candidate_x, candidate_y, t_zero], dim=-1)
+    predicted = model(candidate_features).squeeze(-1)
+    log_probs = F.log_softmax(predicted, dim=0)
+    target = torch.zeros(num_candidates, device=device)
+    target[list(active_indices)] = 1.0 / len(active_indices)
+    return -(target * log_probs).sum()
+
+
+def evaluate_candidate_sources(
+    model: nn.Module,
+    candidates: tuple[FactorySource, ...],
+    candidate_x: Tensor,
+    candidate_y: Tensor,
+    device: torch.device,
+) -> list[dict[str, Any]]:
+    """Score each known candidate facility at t=0 and normalize into a
+    probability distribution across just those candidates (softmax), giving
+    a per-facility attribution ranking to pair with the dense heatmap."""
+    model.eval()
+    t_zero = torch.zeros_like(candidate_x)
+    candidate_features = torch.stack([candidate_x, candidate_y, t_zero], dim=-1)
+    with torch.no_grad():
+        raw = model(candidate_features).squeeze(-1)
+        probs = F.softmax(raw, dim=0).detach().cpu().numpy()
+    results = [
+        {
+            'facility_id': facility.facility_id,
+            'display_name': facility.display_name,
+            'latitude': facility.latitude,
+            'longitude': facility.longitude,
+            'probability': float(p),
+            'raw_score': float(r),
+        }
+        for facility, p, r in zip(candidates, probs, raw.detach().cpu().numpy())
+    ]
+    return sorted(results, key=lambda r: r['probability'], reverse=True)
+
+
+def train_inversion_model(
+    model: nn.Module,
+    dataset: SyntheticSensorDataset,
+    config: TrainingConfig,
+    device: torch.device,
+    epochs_override: int | None = None,
+) -> tuple[nn.Module, list[dict[str, float]]]:
+    epochs = epochs_override if epochs_override is not None else config.epochs
+    optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, build_warmup_cosine_lambda(config.warmup_epochs, epochs, config.min_lr_ratio))
+    weighter = SoftAdaptWeighter(
+        ['data', 'physics', 'boundary', 'source'],
+        config.softadapt_beta,
+        config.softadapt_floor,
+        config.softadapt_ceil,
+        window_size=getattr(config, 'softadapt_window_size', 20)
+    )
+    ema = EMA(model, config.ema_decay)
+
+    colloc_engine = SobolEngine(dimension=3, scramble=True, seed=config.random_seed)
+    bound_engine = SobolEngine(dimension=2, scramble=True, seed=config.random_seed + 1)
+    rar_engine = SobolEngine(dimension=3, scramble=True, seed=config.random_seed + 2)
+
+    base_lambdas = {'data': config.lambda_data, 'physics': config.lambda_physics, 'boundary': config.lambda_boundary, 'source': config.lambda_source}
+    rar_points: Tensor | None = None
+    history: list[dict[str, float]] = []
+    adaptive_weights = {'data': 1.0, 'physics': 1.0, 'boundary': 1.0, 'source': 1.0}
+    has_candidates = dataset.candidate_x is not None and dataset.candidate_y is not None and len(dataset.active_indices) > 0
+
+    best_val_loss = math.inf
+    best_source_loss = math.inf
+    epochs_no_improve = 0
+    stopped_early = False
+
+    LOGGER.info("Stage 1/2 (AdamW): %d epochs", epochs)
+    for epoch in range(1, epochs + 1):
+        model.train()
+        optimizer.zero_grad(set_to_none=True)
+
+        predicted = model(dataset.features)
+        data_loss = F.mse_loss(predicted, dataset.concentration)
+
+        n_random = config.collocation_points if rar_points is None else max(config.collocation_points - rar_points.shape[0], 0)
+        random_colloc = sample_collocation_points(n_random, device, colloc_engine)
+        collocation = random_colloc if rar_points is None else torch.cat([random_colloc, rar_points], dim=0)
+        physics_loss = compute_pde_residual(collocation, model, config.wind_u, config.wind_v, config.diffusion)
+
+        boundary = sample_boundary_points(config.boundary_points, device, bound_engine)
+        boundary_loss = model(boundary).square().mean()
+
+        if has_candidates and base_lambdas['source'] > 0:
+            source_loss = compute_source_prior_loss(model, dataset.candidate_x, dataset.candidate_y, dataset.active_indices, device)
+        else:
+            source_loss = torch.zeros((), device=device)
+
+        current_losses = {
+            'data': float(data_loss.detach().cpu()),
+            'physics': float(physics_loss.detach().cpu()),
+            'boundary': float(boundary_loss.detach().cpu()),
+            'source': float(source_loss.detach().cpu()),
+        }
+        if epoch > config.softadapt_warmup_epochs:
+            adaptive_weights = weighter.compute(current_losses)
+        else:
+            weighter.prev = dict(current_losses)
+            adaptive_weights = {'data': 1.0, 'physics': 1.0, 'boundary': 1.0, 'source': 1.0}
+
+        total_loss = (
+            base_lambdas['data'] * adaptive_weights['data'] * data_loss
+            + base_lambdas['physics'] * adaptive_weights['physics'] * physics_loss
+            + base_lambdas['boundary'] * adaptive_weights['boundary'] * boundary_loss
+            + base_lambdas['source'] * adaptive_weights['source'] * source_loss
+        )
+        total_loss.backward()
+        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.gradient_clip_norm)
+        optimizer.step()
+        ema.update(model)
+        scheduler.step()
+
+        # Validation tracking & Early Stopping
+        val_loss_val = 0.0
+        if dataset.val_features is not None:
+            with torch.no_grad():
+                val_pred = model(dataset.val_features)
+                val_loss_val = float(F.mse_loss(val_pred, dataset.val_concentration).cpu())
+
+        history.append(
+            {
+                'epoch': float(epoch),
+                'total_loss': float(total_loss.detach().cpu()),
+                'val_loss': val_loss_val,
+                'data_loss': current_losses['data'],
+                'physics_loss': current_losses['physics'],
+                'boundary_loss': current_losses['boundary'],
+                'source_loss': current_losses['source'],
+                'weight_data': float(base_lambdas['data'] * adaptive_weights['data']),
+                'weight_physics': float(base_lambdas['physics'] * adaptive_weights['physics']),
+                'weight_boundary': float(base_lambdas['boundary'] * adaptive_weights['boundary']),
+                'weight_source': float(base_lambdas['source'] * adaptive_weights['source']),
+                'learning_rate': float(scheduler.get_last_lr()[0]),
+                'grad_norm': float(grad_norm.detach().cpu() if isinstance(grad_norm, Tensor) else grad_norm),
+            }
+        )
+
+        if epoch > config.rar_warmup_epochs and epoch % config.rar_interval == 0:
+            rar_points = rar_select_points(model, config, device, rar_engine)
+
+        if epoch == 1 or epoch % config.log_every == 0 or epoch == epochs:
+            LOGGER.info(
+                "Epoch %04d | total_loss=%.6f | val=%.6f | data=%.6f | physics=%.6f | boundary=%.6f | source=%.6f",
+                epoch,
+                float(total_loss.detach().cpu()),
+                val_loss_val,
+                current_losses['data'],
+                current_losses['physics'],
+                current_losses['boundary'],
+                current_losses['source'],
+            )
+
+        # Early stopping: only meaningful when a held-out validation split exists.
+        if dataset.val_features is not None and config.early_stop_patience > 0:
+            improved = False
+            if val_loss_val < best_val_loss - 1e-8:
+                best_val_loss = val_loss_val
+                improved = True
+            if current_losses['source'] < best_source_loss - 1e-6:
+                best_source_loss = current_losses['source']
+                improved = True
+            if improved:
+                epochs_no_improve = 0
+            else:
+                epochs_no_improve += 1
+
+            if epochs_no_improve >= config.early_stop_patience:
+                LOGGER.info(
+                    "Early stopping triggered at epoch %04d (no val improvement for %d epochs, best_val_loss=%.6f)",
+                    epoch,
+                    config.early_stop_patience,
+                    best_val_loss,
+                )
+                stopped_early = True
+                break
+
+    if stopped_early:
+        LOGGER.info("Stage 1/2 (AdamW) ended early via early stopping.")
+    LOGGER.info("Stage 2/2 (L-BFGS): %d steps", config.lbfgs_steps)
+    if not history:
+        history.append(
+            {
+                'epoch': 0.0,
+                'total_loss': math.nan,
+                'data_loss': math.nan,
+                'physics_loss': math.nan,
+                'boundary_loss': math.nan,
+                'source_loss': math.nan,
+                'weight_data': 1.0,
+                'weight_physics': 1.0,
+                'weight_boundary': 1.0,
+                'weight_source': 1.0,
+                'learning_rate': 0.0,
+                'grad_norm': math.nan,
+            }
+        )
+
+    final_weights = {
+        'data': base_lambdas['data'] * adaptive_weights['data'],
+        'physics': base_lambdas['physics'] * adaptive_weights['physics'],
+        'boundary': base_lambdas['boundary'] * adaptive_weights['boundary'],
+        'source': base_lambdas['source'] * adaptive_weights['source'],
+    }
+    # NOTE: L-BFGS is stateful and re-evaluates the closure multiple times per step;
+    # running it against a DataParallel wrapper causes replicate/gather churn on every
+    # internal evaluation. Optimize the underlying module's parameters directly instead.
+    lbfgs = torch.optim.LBFGS(unwrap_model(model).parameters(), lr=config.lbfgs_lr, max_iter=config.lbfgs_steps, line_search_fn='strong_wolfe')
+    lbfgs_fixed_collocation = sample_collocation_points(config.collocation_points, device, colloc_engine)
+    lbfgs_fixed_boundary = sample_boundary_points(config.boundary_points, device, bound_engine)
+
+    def closure() -> Tensor:
+        lbfgs.zero_grad(set_to_none=True)
+        predicted = model(dataset.features)
+        data_loss = F.mse_loss(predicted, dataset.concentration)
+        physics_loss = compute_pde_residual(lbfgs_fixed_collocation, model, config.wind_u, config.wind_v, config.diffusion)
+        boundary_loss = model(lbfgs_fixed_boundary).square().mean()
+        if has_candidates and final_weights['source'] > 0:
+            source_loss = compute_source_prior_loss(model, dataset.candidate_x, dataset.candidate_y, dataset.active_indices, device)
+        else:
+            source_loss = torch.zeros((), device=device)
+        loss = (
+            final_weights['data'] * data_loss
+            + final_weights['physics'] * physics_loss
+            + final_weights['boundary'] * boundary_loss
+            + final_weights['source'] * source_loss
+        )
+        loss.backward()
+        return loss
+
+    if config.lbfgs_steps > 0:
+        try:
+            lbfgs.step(closure)
+            ema.update(model)
+        except Exception as e:
+            LOGGER.warning("L-BFGS stage failed or encountered NaNs: %s", e)
+
+    # Finally, evaluate the EMA model
+    ema.copy_to(model)
+    return model, history
+
+
+def evaluate_source_probability_grid(
+    model: nn.Module,
+    sector: CitySector,
+    device: torch.device,
+    grid_size: int = 120,
+    source_time: float = 0.0,
+) -> SourceProbabilityMap:
+    model.eval()
+    x_axis = np.linspace(0.0, 1.0, grid_size, dtype=np.float32)
+    y_axis = np.linspace(0.0, 1.0, grid_size, dtype=np.float32)
+    x_grid, y_grid = np.meshgrid(x_axis, y_axis)
+    t_grid = np.full_like(x_grid, fill_value=source_time, dtype=np.float32)
+
+    x_tensor = torch.tensor(x_grid.reshape(-1, 1), dtype=torch.float32, device=device)
+    y_tensor = torch.tensor(y_grid.reshape(-1, 1), dtype=torch.float32, device=device)
+    t_tensor = torch.tensor(t_grid.reshape(-1, 1), dtype=torch.float32, device=device)
+
+    with torch.no_grad():
+        concentration = model(x_tensor, y_tensor, t_tensor)
+        concentration_grid = concentration.detach().cpu().numpy().reshape(grid_size, grid_size)
+
+    baseline = float(np.percentile(concentration_grid, 5.0))
+    source_scores = np.clip(concentration_grid - baseline, a_min=0.0, a_max=None)
+    source_scores = np.square(source_scores)
+    score_sum = float(np.sum(source_scores))
+    if score_sum <= 0.0 or not np.isfinite(score_sum):
+        LOGGER.warning("Probability scores were degenerate; returning a uniform map.")
+        probabilities = np.full_like(source_scores, 1.0 / source_scores.size)
+    else:
+        probabilities = source_scores / score_sum
+
+    latitudes, longitudes = normalized_to_lat_lon(x_grid, y_grid, sector)
+    return SourceProbabilityMap(
+        latitudes=latitudes,
+        longitudes=longitudes,
+        probabilities=probabilities.astype(np.float32),
+    )
+
+
+def estimate_source_from_probability_map(
+    probability_map: SourceProbabilityMap,
+) -> tuple[float, float, float]:
+    max_index = np.unravel_index(
+        int(np.argmax(probability_map.probabilities)),
+        probability_map.probabilities.shape,
+    )
+    return (
+        float(probability_map.latitudes[max_index]),
+        float(probability_map.longitudes[max_index]),
+        float(probability_map.probabilities[max_index]),
+    )
+
+
+def save_probability_map(
+    probability_map: SourceProbabilityMap,
+    output_path: Path,
+) -> None:
+    np.savez_compressed(
+        output_path,
+        latitudes=probability_map.latitudes,
+        longitudes=probability_map.longitudes,
+        probabilities=probability_map.probabilities,
+    )
+    LOGGER.info("Saved source probability map to %s", output_path)
+
+
+@dataclass(frozen=True)
+class SourceUncertainty:
+    """Uncertainty quantification for a PINN source estimate."""
+    confidence: float          # 0-1, higher = more peaked probability surface
+    stddev_meters: float       # spatial spread of probability mass around peak
+    peak_probability: float    # raw max probability value
+    effective_cells: float     # inverse participation ratio (1 = perfect peak)
+
+
+def compute_source_uncertainty(
+    probability_map: SourceProbabilityMap,
+) -> SourceUncertainty:
+    """Derive confidence and spatial standard deviation from a probability map.
+
+    Confidence is based on the *inverse participation ratio* (IPR):
+        IPR = 1 / sum(p_i^2)
+    For a perfectly peaked map (all mass on one cell), IPR = 1.
+    For a uniform map over N cells, IPR = N.
+    We normalize:  confidence = 1 - (IPR - 1) / (N - 1), clipped to [0, 1].
+
+    The spatial standard deviation is the probability-weighted RMS distance
+    (in meters) from the peak coordinate.
+    """
+    probs = probability_map.probabilities.ravel().astype(np.float64)
+    lats = probability_map.latitudes.ravel().astype(np.float64)
+    lons = probability_map.longitudes.ravel().astype(np.float64)
+    n_cells = len(probs)
+
+    # --- Effective cells (IPR) ---
+    sum_p2 = float(np.sum(probs ** 2))
+    if sum_p2 <= 0.0 or not np.isfinite(sum_p2):
+        return SourceUncertainty(
+            confidence=0.0,
+            stddev_meters=float("inf"),
+            peak_probability=0.0,
+            effective_cells=float(n_cells),
+        )
+
+    ipr = 1.0 / sum_p2
+    # Normalize to [0, 1]: 1 when ipr=1 (perfect peak), 0 when ipr=N (uniform)
+    confidence = max(0.0, min(1.0, 1.0 - (ipr - 1.0) / max(n_cells - 1.0, 1.0)))
+
+    # --- Peak ---
+    peak_idx = int(np.argmax(probs))
+    peak_lat = lats[peak_idx]
+    peak_lon = lons[peak_idx]
+    peak_prob = float(probs[peak_idx])
+
+    # --- Spatial stddev (meters) ---
+    # Approximate meter offsets from peak using simple lat/lon scaling
+    meters_per_deg_lat = 111_320.0
+    meters_per_deg_lon = meters_per_deg_lat * math.cos(math.radians(peak_lat))
+    dy = (lats - peak_lat) * meters_per_deg_lat
+    dx = (lons - peak_lon) * meters_per_deg_lon
+    dist_sq = dx ** 2 + dy ** 2
+    weighted_var = float(np.sum(probs * dist_sq))
+    stddev_m = math.sqrt(max(weighted_var, 0.0))
+
+    LOGGER.info(
+        "Source UQ: confidence=%.4f stddev=%.1f m effective_cells=%.1f peak_prob=%.8f",
+        confidence, stddev_m, ipr, peak_prob,
+    )
+    return SourceUncertainty(
+        confidence=confidence,
+        stddev_meters=round(stddev_m, 1),
+        peak_probability=peak_prob,
+        effective_cells=round(ipr, 1),
+    )
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Train PlumeTrace PINN source inversion model.")
+    parser.add_argument("--epochs", type=int, default=2500, help="Training epochs.")
+    parser.add_argument("--collocation-points", type=int, default=4096)
+    parser.add_argument("--learning-rate", type=float, default=1.0e-3)
+    parser.add_argument("--lambda-data", type=float, default=1.0)
+    parser.add_argument("--lambda-physics", type=float, default=0.10)
+    parser.add_argument("--grid-size", type=int, default=120)
+    parser.add_argument("--seed", type=int, default=2026)
+    parser.add_argument("--output", type=Path, default=Path("plumetrace_source_probability_map.npz"))
+    parser.add_argument("--load-checkpoint", type=Path, default=None, help="Path to a .pt checkpoint to load (skips training).")
+    parser.add_argument("--save-checkpoint", type=Path, default=None, help="Path to save the trained .pt checkpoint.")
+    return parser.parse_args()
+
+
+def main() -> None:
+    configure_logging()
+    args = parse_args()
+
+    config = TrainingConfig(
+        epochs=args.epochs,
+        learning_rate=args.learning_rate,
+        lambda_data=args.lambda_data,
+        lambda_physics=args.lambda_physics,
+        collocation_points=args.collocation_points,
+        random_seed=args.seed,
+    )
+    model_config = ModelConfig()
+
+    set_reproducibility(config.random_seed)
+    device = get_device()
+    sector = CitySector()
+
+    try:
+        model = PlumeInversionPINN(model_config).to(device)
+
+        if args.load_checkpoint and args.load_checkpoint.exists():
+            LOGGER.info("Loading model checkpoint from %s (bypassing training)", args.load_checkpoint)
+            state_dict = torch.load(args.load_checkpoint, map_location=device, weights_only=False)
+            if "model_state_dict" in state_dict:
+                model.load_state_dict(state_dict["model_state_dict"])
+            else:
+                model.load_state_dict(state_dict)
+        else:
+            dataset = generate_synthetic_sensor_data(sector, config, device)
+            model, history = train_inversion_model(model, dataset, config, device)
+            
+            if args.save_checkpoint:
+                LOGGER.info("Saving trained model to %s", args.save_checkpoint)
+                args.save_checkpoint.parent.mkdir(parents=True, exist_ok=True)
+                torch.save({"model_state_dict": model.state_dict()}, args.save_checkpoint)
+
+        probability_map = evaluate_source_probability_grid(
+            model,
+            sector,
+            device,
+            grid_size=args.grid_size,
+            source_time=0.0,
+        )
+        predicted_latitude, predicted_longitude, predicted_probability = estimate_source_from_probability_map(probability_map)
+        save_probability_map(probability_map, args.output)
+
+        LOGGER.info("Known source latitude=%.6f longitude=%.6f", sector.source_latitude, sector.source_longitude)
+        LOGGER.info("Estimated source latitude=%.6f longitude=%.6f probability=%.8f", predicted_latitude, predicted_longitude, predicted_probability)
+        
+    except Exception as exc:
+        LOGGER.exception("PINN inversion run failed: %s", exc)
+        raise
+
+if __name__ == "__main__":
+    main()
+

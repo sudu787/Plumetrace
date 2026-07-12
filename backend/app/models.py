@@ -84,3 +84,36 @@ class EnforcementDraft(Base):
             f"id={self.id}, sensor_id={self.sensor_id!r}, "
             f"status={self.status!r})"
         )
+
+
+class FactoryFacility(Base):
+    """Registered industrial facility capable of producing hazardous plumes."""
+
+    __tablename__ = "factory_facilities"
+    __table_args__ = (
+        Index("ix_factory_facilities_zoning_permit_id", "zoning_permit_id", unique=True),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        nullable=False,
+    )
+    factory_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    corporate_owner: Mapped[str] = mapped_column(String(128), nullable=False)
+    zoning_permit_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    latitude: Mapped[float] = mapped_column(Float, nullable=False)
+    longitude: Mapped[float] = mapped_column(Float, nullable=False)
+    plot_radius_km: Mapped[float] = mapped_column(Float, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            "FactoryFacility("
+            f"name={self.factory_name!r}, permit={self.zoning_permit_id!r})"
+        )

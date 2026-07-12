@@ -1,0 +1,6 @@
+[U.S. Clean Air Act Section 112 - National Emission Standards for Hazardous Air Pollutants]
+Provides the statutory authority under 42 U.S.C. § 7412 to control emissions of hazardous substances.
+Regulates Sulfur Dioxide (SO2) emissions under National Ambient Air Quality Standards (NAAQS). Specifically, the primary 1-hour standard is set at 75 ppb to protect public health.
+Regulates Particulate Matter (PM2.5) standards with daily concentration limits not to exceed 35.0 ug/m3.
+Authorizes the environmental agency to issue administrative compliance orders, mandate immediate process monitoring record preservation, and seek civil penalties of up to $37,500 per day for each violation.
+Requires facilities suspected of causing toxic exceedances to preserve all process logs, continuous emission monitor (CEMS) calibrations, and scrubber operational data.

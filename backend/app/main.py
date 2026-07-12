@@ -20,8 +20,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database import Base, engine, get_db_session
-from app.models import AirQualityReading, EnforcementDraft
+from app.models import AirQualityReading, EnforcementDraft, FactoryFacility
 from app.mqtt_handler import mqtt_handler
+from app.rag_engine import initialize_rag
 from app.schemas import (
     AirQualityReadingResponse,
     DraftReviewRequest,
@@ -58,10 +59,23 @@ class AgentOrchestrationResponse(BaseModel):
     core_ai_inversion_coordinates: dict[str, Any]
     target_facility_profile: dict[str, Any]
     enforcement_report: str
-    hazard_status: str
+    review_status: str
+
     lifecycle_events: list[str]
     errors: list[str] = Field(default_factory=list)
 
+
+class FactoryFacilityResponse(BaseModel):
+    id: uuid.UUID
+    factory_name: str
+    corporate_owner: str
+    zoning_permit_id: str
+    latitude: float
+    longitude: float
+    plot_radius_km: float
+
+    class Config:
+        from_attributes = True
 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 api_key_query = APIKeyQuery(name="api_key", auto_error=False)
@@ -87,12 +101,44 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """Create database tables, start MQTT ingestion, and cleanly shut down."""
+    """Create database tables, preload AI, start MQTT ingestion, and cleanly shut down."""
     logger.info("Starting PlumeTrace backend.")
     try:
         async with engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
         logger.info("Database schema is ready.")
+
+        # Initialize the compliance RAG pipeline
+        logger.info("Initializing compliance RAG engine...")
+        initialize_rag()
+
+        # Seed default factories
+        async with get_db_session() as session:
+            result = await session.execute(select(FactoryFacility).limit(1))
+            if not result.scalars().first():
+                default_factories = [
+                    FactoryFacility(factory_name="Apex Petrochemical Complex", corporate_owner="Apex Industrial Holdings LLC", zoning_permit_id="MUNI-IZ-2044-APX-17", latitude=40.71345, longitude=-74.00765, plot_radius_km=0.42),
+                    FactoryFacility(factory_name="Global Logistics Foundry", corporate_owner="Harborline Materials Group", zoning_permit_id="MUNI-IZ-2041-GLF-09", latitude=40.71610, longitude=-74.00280, plot_radius_km=0.36),
+                    FactoryFacility(factory_name="Northbank Solvents Terminal", corporate_owner="CivicChem Transport Partners", zoning_permit_id="MUNI-IZ-2039-NST-22", latitude=40.71020, longitude=-74.01160, plot_radius_km=0.31),
+                    FactoryFacility(factory_name="Eastside Manufacturing Plant", corporate_owner="Eastside Corp", zoning_permit_id="MUNI-IZ-2055-EMP-10", latitude=40.71800, longitude=-74.00500, plot_radius_km=0.28),
+                    FactoryFacility(factory_name="Riverside Chemical Works", corporate_owner="Riverside Industries", zoning_permit_id="MUNI-IZ-2060-RCW-05", latitude=40.70900, longitude=-74.00800, plot_radius_km=0.35)
+                ]
+                session.add_all(default_factories)
+                await session.commit()
+                logger.info("Seeded 5 default factory facilities.")
+
+        # Preload the PINN engine to avoid cold-start delays on the first hazard
+        logger.info("Preloading PINN AI model into memory...")
+        project_root = Path(__file__).resolve().parents[2]
+        if str(project_root) not in sys.path:
+            sys.path.insert(0, str(project_root))
+        
+        try:
+            from agent_orchestrator import _get_or_load_pinn
+            await asyncio.to_thread(_get_or_load_pinn)
+            logger.info("PINN AI model preloaded successfully.")
+        except Exception as exc:
+            logger.warning("Failed to preload PINN model: %s", exc)
 
         await mqtt_handler.start()
         yield
@@ -189,11 +235,43 @@ async def review_draft(
         if draft.status != "pending_human_review":
             raise HTTPException(status_code=400, detail=f"Draft is already {draft.status}")
             
-        draft.status = review.status
-        draft.reviewer_id = review.reviewer_id
-        draft.reviewed_at = datetime.now(UTC)
-        if review.report_text is not None:
-            draft.report_text = review.report_text
+        if review.status == "refine":
+            from langchain_core.messages import SystemMessage, HumanMessage
+            from agent_orchestrator import build_compliance_chat_model
+
+            refine_system_prompt = (
+                "You are PlumeTrace Compliance Counsel. A human reviewer has requested "
+                "refinements to the preliminary enforcement warning report draft. "
+                "Revise the document text carefully incorporating their feedback. "
+                "You MUST maintain the legally rigorous, official tone and the three-paragraph structure. "
+                "Begin the document with the exact banner: "
+                "\"AI-GENERATED DRAFT — REQUIRES HUMAN VERIFICATION BEFORE USE\""
+            )
+
+            feedback_text = review.feedback or "Rewrite to improve clarity."
+            messages = [
+                SystemMessage(content=refine_system_prompt),
+                HumanMessage(
+                    content=(
+                        f"Original Draft:\n{draft.report_text}\n\n"
+                        f"Requested Refinements:\n{feedback_text}"
+                    )
+                ),
+            ]
+
+            chat_model = build_compliance_chat_model()
+            response = await asyncio.to_thread(chat_model.invoke, messages)
+
+            draft.report_text = str(response.content).strip()
+            draft.status = "pending_human_review"
+            draft.reviewer_id = review.reviewer_id
+            draft.reviewed_at = datetime.now(UTC)
+        else:
+            draft.status = review.status
+            draft.reviewer_id = review.reviewer_id
+            draft.reviewed_at = datetime.now(UTC)
+            if review.report_text is not None:
+                draft.report_text = review.report_text
             
         await session.commit()
         await session.refresh(draft)
@@ -287,3 +365,16 @@ async def stream_endpoint(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@app.get(
+    "/api/v1/factories",
+    response_model=list[FactoryFacilityResponse],
+    summary="Fetch all registered industrial facilities",
+)
+async def get_factories(
+    session: AsyncSession = Depends(get_db),
+) -> list[FactoryFacilityResponse]:
+    """Fetch all registered factories from the spatial registry."""
+    result = await session.execute(select(FactoryFacility))
+    return list(result.scalars().all())

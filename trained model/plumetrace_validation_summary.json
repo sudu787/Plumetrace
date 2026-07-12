@@ -1,36 +1,80 @@
 {
-  "known_source": {
-    "latitude": 40.7138,
-    "longitude": -74.0072
-  },
+  "active_facilities": [
+    {
+      "facility_id": "northbank_solvents_terminal",
+      "display_name": "Northbank Solvents Terminal",
+      "latitude": 40.71,
+      "longitude": -74.013
+    }
+  ],
+  "candidate_scores": [
+    {
+      "facility_id": "riverside_chemical_works",
+      "display_name": "Riverside Chemical Works",
+      "latitude": 40.7075,
+      "longitude": -74.009,
+      "probability": 0.25002557039260864,
+      "raw_score": 0.00018192223797086626
+    },
+    {
+      "facility_id": "eastside_manufacturing_plant",
+      "display_name": "Eastside Manufacturing Plant",
+      "latitude": 40.7205,
+      "longitude": -74.005,
+      "probability": 0.24999487400054932,
+      "raw_score": 5.917027738178149e-05
+    },
+    {
+      "facility_id": "northbank_solvents_terminal",
+      "display_name": "Northbank Solvents Terminal",
+      "latitude": 40.71,
+      "longitude": -74.013,
+      "probability": 0.24999214708805084,
+      "raw_score": 4.8274436267092824e-05
+    },
+    {
+      "facility_id": "global_freight_terminal",
+      "display_name": "Global Freight Terminal",
+      "latitude": 40.7195,
+      "longitude": -73.9985,
+      "probability": 0.24998739361763,
+      "raw_score": 2.9241666197776794e-05
+    }
+  ],
   "architecture": "fourier_residual",
   "raw_pinn_peak": {
-    "latitude": 40.714599609375,
-    "longitude": -74.01177978515625,
-    "probability": 2.3370263036932823e-05,
-    "distance_meters": 396.1046841183654
+    "latitude": 40.706298828125,
+    "longitude": -73.9990234375,
+    "probability": 0.0012332512846877264,
+    "distance_meters": 1247.90627720278,
+    "nearest_active_facility": "Northbank Solvents Terminal"
   },
   "fused_physics_pinn_peak": {
-    "latitude": 40.713863372802734,
-    "longitude": -74.00725555419922,
-    "probability": 0.002005470144999816,
-    "distance_meters": 8.460511425071319
+    "latitude": 40.7133674621582,
+    "longitude": -74.00987243652344,
+    "probability": 0.0019025234034045922,
+    "distance_meters": 457.9288321098217,
+    "nearest_active_facility": "Northbank Solvents Terminal"
   },
   "final_losses": {
-    "epoch": 2501.0,
-    "total_loss": 0.023543812334537506,
-    "data_loss": NaN,
-    "physics_loss": NaN,
-    "boundary_loss": NaN,
-    "weight_data": 0.7642506129787023,
-    "weight_physics": 0.13944344547667892,
-    "weight_boundary": 0.016826298644910153,
-    "learning_rate": 0.0,
-    "grad_norm": NaN
+    "epoch": 987.0,
+    "total_loss": 0.1430959552526474,
+    "val_loss": 0.0657181516289711,
+    "data_loss": 0.0735134407877922,
+    "physics_loss": 5.934537330176681e-05,
+    "boundary_loss": 6.94029902992277e-11,
+    "source_loss": 1.3862850666046143,
+    "weight_data": 1.001836641929519,
+    "weight_physics": 0.09944541485658423,
+    "weight_boundary": 0.02003744071794479,
+    "weight_source": 0.05009185868036995,
+    "learning_rate": 0.0007232404884967582,
+    "grad_norm": 0.00026590476045385003
   },
-  "loss_reduction_ratio": 0.00299047615129577,
-  "lbfgs_final_total_loss": 0.023543812334537506,
-  "probability_sum": 1.0000000000000002,
+  "loss_reduction_ratio": 0.013068118304251069,
+  "lbfgs_final_total_loss": 0.1430959552526474,
+  "probability_sum": 0.9999999999999998,
   "all_probabilities_finite": true,
-  "pass_distance_threshold_250m": true
+  "pass_distance_threshold_250m": false,
+  "top_candidate_matches_ground_truth": false
 }
