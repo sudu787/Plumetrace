@@ -322,7 +322,7 @@ async def orchestrate_agent_response(
             ),
             target_facility_profile=final_state.get("target_facility_profile", {}),
             enforcement_report=final_state.get("enforcement_report", ""),
-            hazard_status=str(final_state.get("hazard_status", "unknown")),
+            review_status="pending_human_review" if final_state.get("enforcement_report") else "none",
             lifecycle_events=list(final_state.get("lifecycle_events", [])),
             errors=list(final_state.get("errors", [])),
         )

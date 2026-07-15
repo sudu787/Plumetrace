@@ -46,6 +46,9 @@ class SSEManager:
                 queue.put_nowait(message)
             except asyncio.QueueFull:
                 stale_queues.append(queue)
+            except Exception:
+                # Queue in unexpected state — detach it
+                stale_queues.append(queue)
 
         if stale_queues:
             async with self._lock:

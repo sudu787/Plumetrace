@@ -25,6 +25,7 @@ class AirQualityReadingBase(BaseModel):
     sensor_id: SensorId
     latitude: Latitude
     longitude: Longitude
+    altitude: StrictFloat = Field(default=0.0, description="Altitude in meters")
     pm25: NonNegativeReading = Field(description="PM2.5 concentration in ug/m3")
     so2: NonNegativeReading = Field(description="SO2 concentration in ppb")
     wind_speed: NonNegativeReading = Field(description="Wind speed in meters per second")
@@ -43,6 +44,7 @@ class AirQualityReadingBase(BaseModel):
     @field_validator(
         "latitude",
         "longitude",
+        "altitude",
         "pm25",
         "so2",
         "wind_speed",
@@ -50,10 +52,12 @@ class AirQualityReadingBase(BaseModel):
         mode="before",
     )
     @classmethod
-    def require_float_values(cls, value: Any) -> Any:
-        """Reject integer and boolean values for fields backed by DB Float columns."""
-        if isinstance(value, bool) or isinstance(value, int):
-            raise ValueError("value must be a floating-point number")
+    def coerce_numeric_to_float(cls, value: Any) -> Any:
+        """Coerce integer values to float. Reject booleans."""
+        if isinstance(value, bool):
+            raise ValueError("value must be a floating-point number, not a boolean")
+        if isinstance(value, int):
+            return float(value)
         return value
 
 

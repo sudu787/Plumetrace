@@ -23,6 +23,21 @@ logger = logging.getLogger(__name__)
 # Debounce tracker to prevent excessive orchestration triggers
 _last_orchestrator_trigger: dict[str, float] = {}
 
+# Cached reference to the agent orchestrator graph builder (loaded once)
+_cached_build_response_graph: Any = None
+
+
+def _get_response_graph_builder() -> Any:
+    """Lazily import and cache the agent orchestrator graph builder."""
+    global _cached_build_response_graph
+    if _cached_build_response_graph is None:
+        project_root = Path(__file__).resolve().parents[2]
+        if str(project_root) not in sys.path:
+            sys.path.insert(0, str(project_root))
+        from agent_orchestrator import build_response_graph
+        _cached_build_response_graph = build_response_graph
+    return _cached_build_response_graph
+
 
 class MQTTHandler:
     """Lifecycle-managed gmqtt subscriber for city air-quality streams."""
@@ -52,10 +67,11 @@ class MQTTHandler:
         for attempt in range(1, settings.MQTT_CONNECT_RETRIES + 1):
             try:
                 # Add authentication if configured
-                client.set_auth_credentials(
-                    settings.MQTT_USERNAME or "", 
-                    settings.MQTT_PASSWORD or ""
-                ) if settings.MQTT_USERNAME else None
+                if settings.MQTT_USERNAME:
+                    client.set_auth_credentials(
+                        settings.MQTT_USERNAME,
+                        settings.MQTT_PASSWORD or ""
+                    )
 
                 await client.connect(
                     settings.MQTT_BROKER_HOST,
@@ -160,6 +176,7 @@ class MQTTHandler:
                 timestamp=timestamp,
                 latitude=reading.latitude,
                 longitude=reading.longitude,
+                altitude=reading.altitude,
                 pm25=reading.pm25,
                 so2=reading.so2,
                 wind_speed=reading.wind_speed,
@@ -180,18 +197,14 @@ class MQTTHandler:
             )
 
             if reading.so2 > 75.0 or reading.pm25 > 35.0:
-                global _last_orchestrator_trigger
                 current_time = asyncio.get_event_loop().time()
                 last_trig = _last_orchestrator_trigger.get(reading.sensor_id, 0.0)
                 if current_time - last_trig > 15.0:
                     _last_orchestrator_trigger[reading.sensor_id] = current_time
                     logger.warning("Hazardous spike detected for %s. Triggering Agent Orchestrator.", reading.sensor_id)
-                    project_root = Path(__file__).resolve().parents[2]
-                    if str(project_root) not in sys.path:
-                        sys.path.insert(0, str(project_root))
-                    
-                    from agent_orchestrator import build_response_graph
-                    graph = build_response_graph()
+
+                    build_graph = _get_response_graph_builder()
+                    graph = build_graph()
                     
                     initial_state = {
                         "sensor_alert_payload": {
@@ -225,7 +238,8 @@ class MQTTHandler:
                                         status="pending_human_review",
                                     )
                                     session.add(draft)
-                                    await session.commit()
+                                    # Let the context manager handle commit
+                                    await session.flush()
                                     await session.refresh(draft)
                                     draft_id = str(draft.id)
                                     
@@ -243,7 +257,10 @@ class MQTTHandler:
                         except Exception as e:
                             logger.error("Agent orchestrator background task failed: %s", e)
 
-                    asyncio.create_task(run_orchestrator(initial_state))
+                    # Track the orchestrator task for proper lifecycle management
+                    orch_task = asyncio.create_task(run_orchestrator(initial_state))
+                    self._tasks.add(orch_task)
+                    orch_task.add_done_callback(self._tasks.discard)
                 else:
                     logger.info("Hazard spike for %s ignored due to orchestrator debounce.", reading.sensor_id)
 

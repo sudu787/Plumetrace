@@ -37,6 +37,7 @@ class AirQualityReading(Base):
     so2: Mapped[float] = mapped_column(Float, nullable=False)
     wind_speed: Mapped[float] = mapped_column(Float, nullable=False)
     wind_direction: Mapped[float] = mapped_column(Float, nullable=False)
+    altitude: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
 
     def __repr__(self) -> str:
         return (

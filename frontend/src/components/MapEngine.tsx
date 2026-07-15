@@ -249,71 +249,95 @@ export default function MapEngine({ attributedSource, onTelemetry, onHazard, onC
   }, [latestHazardReading, attributedSource, fitToPlume, isReplayMode, registryFactories]);
 
   useEffect(() => {
-    onConnectionStateChange?.("connecting");
+    let cancelled = false;
+    let eventSource: EventSource | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let backoffMs = 1000;
+    const MAX_BACKOFF_MS = 30000;
+
     const apiKey = process.env.NEXT_PUBLIC_API_KEY || "dev-insecure-key";
-    const eventSource = new EventSource(`${SSE_URL}?api_key=${apiKey}`);
 
-    eventSource.onopen = () => {
-      onConnectionStateChange?.("online");
-    };
+    function connect() {
+      if (cancelled) return;
+      onConnectionStateChange?.("connecting");
+      eventSource = new EventSource(`${SSE_URL}?api_key=${apiKey}`);
 
-    eventSource.onmessage = (event: MessageEvent<string>) => {
-      try {
-        const parsed = JSON.parse(event.data) as any;
-        const records = Array.isArray(parsed) ? parsed : [parsed];
-        records.forEach((record) => {
-          if (record.type === "enforcement_report") {
-            onEnforcementReport?.(record);
-            return;
-          }
-          const reading = normalizeTelemetry(record);
-          if (!reading) {
-            return;
-          }
+      eventSource.onopen = () => {
+        backoffMs = 1000; // Reset backoff on successful connection
+        onConnectionStateChange?.("online");
+      };
 
-          const severity = isCritical(reading) ? "critical" : "normal";
-          setSensorMap((current) => {
-            const previous = current[reading.sensor_id];
-            return {
-              ...current,
-              [reading.sensor_id]: {
-                sensor_id: reading.sensor_id,
-                label: previous?.label ?? reading.sensor_id.replaceAll("_", " "),
-                latitude: reading.latitude,
-                longitude: reading.longitude,
-                pm25: reading.pm25,
-                so2: reading.so2,
-                wind_speed: reading.wind_speed,
-                wind_direction: reading.wind_direction,
-                timestamp: reading.timestamp
-              }
-            };
-          });
-          onTelemetry?.(reading, severity);
+      eventSource.onmessage = (event: MessageEvent<string>) => {
+        try {
+          const parsed = JSON.parse(event.data) as any;
+          const records = Array.isArray(parsed) ? parsed : [parsed];
+          records.forEach((record) => {
+            if (record.type === "enforcement_report") {
+              onEnforcementReport?.(record);
+              return;
+            }
+            const reading = normalizeTelemetry(record);
+            if (!reading) {
+              return;
+            }
 
-          if (severity === "critical") {
-            const plume = buildPlumeFeature(registryFactoriesRef.current, reading, 1);
-            setLatestHazardReading(reading);
-            onHazard?.({
-              reading,
-              suspectedSource: plume.suspectedSource,
-              plume: plume.polygon
+            const severity = isCritical(reading) ? "critical" : "normal";
+            setSensorMap((current) => {
+              const previous = current[reading.sensor_id];
+              return {
+                ...current,
+                [reading.sensor_id]: {
+                  sensor_id: reading.sensor_id,
+                  label: previous?.label ?? reading.sensor_id.replaceAll("_", " "),
+                  latitude: reading.latitude,
+                  longitude: reading.longitude,
+                  pm25: reading.pm25,
+                  so2: reading.so2,
+                  wind_speed: reading.wind_speed,
+                  wind_direction: reading.wind_direction,
+                  timestamp: reading.timestamp
+                }
+              };
             });
-          }
-        });
-      } catch (error) {
-        console.error("Unable to parse PlumeTrace telemetry payload", error);
-      }
-    };
+            onTelemetry?.(reading, severity);
 
-    eventSource.onerror = () => {
-      onConnectionStateChange?.("offline");
-    };
+            if (severity === "critical") {
+              const plume = buildPlumeFeature(registryFactoriesRef.current, reading, 1);
+              setLatestHazardReading(reading);
+              onHazard?.({
+                reading,
+                suspectedSource: plume.suspectedSource,
+                plume: plume.polygon
+              });
+            }
+          });
+        } catch (error) {
+          console.error("Unable to parse PlumeTrace telemetry payload", error);
+        }
+      };
+
+      eventSource.onerror = () => {
+        onConnectionStateChange?.("offline");
+        eventSource?.close();
+        eventSource = null;
+        // Exponential backoff reconnection
+        if (!cancelled) {
+          reconnectTimer = setTimeout(() => {
+            connect();
+          }, backoffMs);
+          backoffMs = Math.min(backoffMs * 2, MAX_BACKOFF_MS);
+        }
+      };
+    }
+
+    connect();
 
     return () => {
-      eventSource.close();
+      cancelled = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      eventSource?.close();
     };
-  }, [onConnectionStateChange, onHazard, onTelemetry]);
+  }, [onConnectionStateChange, onHazard, onTelemetry, onEnforcementReport]);
 
   // Reconstruct sensor states up to replayIndex in replay mode
   const currentSensorMap = useMemo(() => {

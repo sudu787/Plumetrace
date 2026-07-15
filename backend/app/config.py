@@ -1,8 +1,11 @@
 """Application configuration for PlumeTrace."""
 
+import logging
 from functools import lru_cache
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_config_logger = logging.getLogger("plumetrace.config")
 
 
 class Settings(BaseSettings):
@@ -51,7 +54,13 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     """Return a cached settings instance."""
-    return Settings()
+    s = Settings()
+    if s.PLUMETRACE_API_KEY in ("dev-insecure-key", "test-api-key-123"):
+        _config_logger.warning(
+            "SECURITY: PLUMETRACE_API_KEY is set to a default insecure value. "
+            "Set a strong key via environment variable before deploying."
+        )
+    return s
 
 
 settings = get_settings()

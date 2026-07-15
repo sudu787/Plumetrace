@@ -46,7 +46,12 @@ export default function DashboardPage() {
     setAutonomousReport(null);
   }, []);
 
-  const handleEnforcementReport = useCallback((data: any) => {
+  const handleEnforcementReport = useCallback((data: {
+    source_coordinates?: { source_latitude?: number; source_longitude?: number; confidence_score?: number };
+    report?: string;
+    draft_id?: string;
+    review_status?: string;
+  }) => {
     const coords = data.source_coordinates || {};
     if (coords.source_latitude && coords.source_longitude) {
       setAttributedSource({

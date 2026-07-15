@@ -56,6 +56,7 @@ except ImportError as exc:  # pragma: no cover - dependency guard for local demo
 LOGGER = logging.getLogger("plumetrace.agent_orchestrator")
 PROJECT_ROOT = Path(__file__).resolve().parent
 PINN_CHECKPOINT_CANDIDATES = (
+    PROJECT_ROOT / "pinn_model_trained.pt",
     PROJECT_ROOT / "model_artifacts" / "plumetrace_pinn_checkpoint.pt",
     PROJECT_ROOT / "trained model" / "plumetrace_pinn_checkpoint.pt",
 )
@@ -628,6 +629,7 @@ def evaluate_physics_fused_posterior(
 
     obs_x = np.array([r['x'] for r in dataset.rows], dtype=np.float32)[None, :]
     obs_y = np.array([r['y'] for r in dataset.rows], dtype=np.float32)[None, :]
+    obs_z = np.array([r.get('z', 0.5) for r in dataset.rows], dtype=np.float32)[None, :]
     obs_t = np.array([r['elapsed_time'] for r in dataset.rows], dtype=np.float32)[None, :]
     obs_c = np.array([r['normalized_concentration'] for r in dataset.rows], dtype=np.float32)[None, :]
 
@@ -635,9 +637,13 @@ def evaluate_physics_fused_posterior(
 
     sx = ((pinn_map.longitudes - sector.lon_min) / (sector.lon_max - sector.lon_min)).reshape(-1, 1).astype(np.float32)
     sy = ((pinn_map.latitudes - sector.lat_min) / (sector.lat_max - sector.lat_min)).reshape(-1, 1).astype(np.float32)
+    # Source z normalized to mid-stack height
+    sz = np.full_like(sx, 0.225)
 
     signal = analytic_advection_diffusion_plume(
-        obs_x, obs_y, obs_t, sx, sy, config.wind_u, config.wind_v, config.diffusion
+        obs_x, obs_y, obs_z, obs_t, sx, sy, sz,
+        config.wind_u, config.wind_v, config.wind_w,
+        config.diffusion, config.diffusion_z
     )
     signal = signal / np.maximum(signal.max(axis=1, keepdims=True), 1.0e-8)
     mse = np.mean((signal - obs_c) ** 2, axis=1).reshape(pinn_map.probabilities.shape)
