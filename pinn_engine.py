@@ -53,9 +53,23 @@ from pinn.utils import (
     configure_logging,
     lat_lon_to_normalized as _lat_lon_to_normalized,
     normalized_to_lat_lon as _normalized_to_lat_lon,
+    alt_to_normalized as _alt_to_normalized,
+    normalized_to_alt as _normalized_to_alt,
     EMA,
     SoftAdaptWeighter
 )
+
+def alt_to_normalized(
+    altitude: float | np.ndarray,
+    sector: CitySector,
+) -> np.ndarray:
+    return _alt_to_normalized(altitude, sector.alt_min, sector.alt_max)
+
+def normalized_to_alt(
+    z: np.ndarray,
+    sector: CitySector,
+) -> np.ndarray:
+    return _normalized_to_alt(z, sector.alt_min, sector.alt_max)
 
 
 @dataclass
@@ -152,7 +166,7 @@ class PlumeInversionPINN(nn.Module):
         super().__init__()
         self.config = model_config
         arch = model_config.arch_type
-        in_dim = 3
+        in_dim = 4 # (x, y, z, t)
 
         if arch == 'fourier_residual':
             self.encoder: nn.Module | None = FourierFeatures(in_dim, model_config.fourier_bands, model_config.fourier_sigma)
@@ -205,16 +219,16 @@ class PlumeInversionPINN(nn.Module):
                 nn.init.xavier_uniform_(module.weight)
                 nn.init.zeros_(module.bias)
 
-    def forward(self, x: Tensor, y: Tensor | None = None, t: Tensor | None = None) -> Tensor:
-        if y is None and t is None:
+    def forward(self, x: Tensor, y: Tensor | None = None, z: Tensor | None = None, t: Tensor | None = None) -> Tensor:
+        if y is None and z is None and t is None:
             features = x
-        elif y is not None and t is not None:
-            features = torch.cat((x, y, t), dim=1)
+        elif y is not None and z is not None and t is not None:
+            features = torch.cat((x, y, z, t), dim=1)
         else:
-            raise ValueError("Provide either a single feature tensor or all x, y, t tensors.")
+            raise ValueError("Provide either a single feature tensor or all x, y, z, t tensors.")
 
-        if features.ndim != 2 or features.shape[1] != 3:
-            raise ValueError("Model input must have shape [batch, 3]")
+        if features.ndim != 2 or features.shape[1] != 4:
+            raise ValueError("Model input must have shape [batch, 4]")
         arch = self.config.arch_type
         if arch == 'siren':
             hidden = self.backbone(features)
@@ -240,16 +254,17 @@ def unwrap_model(model: nn.Module) -> nn.Module:
 # Physics residual
 # ============================================================
 def compute_pde_residual(
-    features: Tensor, model: nn.Module, u: float, v: float, diffusion: float, reduction: Literal['mean', 'none'] = 'mean', create_graph: bool = True
+    features: Tensor, model: nn.Module, u: float, v: float, w: float, diffusion_h: float, diffusion_v: float, reduction: Literal['mean', 'none'] = 'mean', create_graph: bool = True
 ) -> Tensor:
     features = features.clone().requires_grad_(True)
     concentration = model(features)
     ones = torch.ones_like(concentration)
-    gradients = torch.autograd.grad(concentration, features, grad_outputs=ones, create_graph=create_graph, retain_graph=create_graph)[0]
-    dC_dx, dC_dy, dC_dt = gradients[:, 0:1], gradients[:, 1:2], gradients[:, 2:3]
-    d2C_dx2 = torch.autograd.grad(dC_dx, features, grad_outputs=torch.ones_like(dC_dx), create_graph=create_graph, retain_graph=create_graph)[0][:, 0:1]
-    d2C_dy2 = torch.autograd.grad(dC_dy, features, grad_outputs=torch.ones_like(dC_dy), create_graph=create_graph, retain_graph=create_graph)[0][:, 1:2]
-    residual = dC_dt + u * dC_dx + v * dC_dy - diffusion * (d2C_dx2 + d2C_dy2)
+    gradients = torch.autograd.grad(concentration, features, grad_outputs=ones, create_graph=True, retain_graph=True)[0]
+    dC_dx, dC_dy, dC_dz, dC_dt = gradients[:, 0:1], gradients[:, 1:2], gradients[:, 2:3], gradients[:, 3:4]
+    d2C_dx2 = torch.autograd.grad(dC_dx, features, grad_outputs=torch.ones_like(dC_dx), create_graph=create_graph, retain_graph=True)[0][:, 0:1]
+    d2C_dy2 = torch.autograd.grad(dC_dy, features, grad_outputs=torch.ones_like(dC_dy), create_graph=create_graph, retain_graph=True)[0][:, 1:2]
+    d2C_dz2 = torch.autograd.grad(dC_dz, features, grad_outputs=torch.ones_like(dC_dz), create_graph=create_graph, retain_graph=create_graph)[0][:, 2:3]
+    residual = dC_dt + u * dC_dx + v * dC_dy + w * dC_dz - diffusion_h * (d2C_dx2 + d2C_dy2) - diffusion_v * d2C_dz2
     squared = residual.square()
     return squared.mean() if reduction == 'mean' else squared
 
@@ -261,20 +276,30 @@ def sample_collocation_points(count: int, device: torch.device, engine: SobolEng
     return engine.draw(count).to(device=device, dtype=torch.float32)
 
 def sample_boundary_points(count: int, device: torch.device, engine: SobolEngine) -> Tensor:
-    n = max(count // 4, 1)
-    free = engine.draw(n * 2).to(device=device, dtype=torch.float32)
-    t, other = free[:n, 0:1], free[n:, 0:1]
-    side0 = torch.cat([torch.zeros((n, 1), device=device), other, t], dim=1)
-    side1 = torch.cat([torch.ones((n, 1), device=device), other, t], dim=1)
-    side2 = torch.cat([other, torch.zeros((n, 1), device=device), t], dim=1)
-    side3 = torch.cat([other, torch.ones((n, 1), device=device), t], dim=1)
-    return torch.cat([side0, side1, side2, side3], dim=0)
+    n = max(count // 6, 1)
+    free = engine.draw(n * 3).to(device=device, dtype=torch.float32)
+    zeros = torch.zeros((n, 1), device=device)
+    ones = torch.ones((n, 1), device=device)
+    
+    f0 = free[0:n]
+    s0 = torch.cat([zeros, f0], dim=1)
+    s1 = torch.cat([ones, f0], dim=1)
+    
+    f1 = free[n:2*n]
+    s2 = torch.cat([f1[:,0:1], zeros, f1[:,1:3]], dim=1)
+    s3 = torch.cat([f1[:,0:1], ones, f1[:,1:3]], dim=1)
+    
+    f2 = free[2*n:3*n]
+    s4 = torch.cat([f2[:,0:2], zeros, f2[:,2:3]], dim=1)
+    s5 = torch.cat([f2[:,0:2], ones, f2[:,2:3]], dim=1)
+    
+    return torch.cat([s0, s1, s2, s3, s4, s5], dim=0)
 
 def rar_select_points(model: nn.Module, config: TrainingConfig, device: torch.device, engine: SobolEngine) -> Tensor:
     pool_size = config.collocation_points * config.rar_pool_multiplier
     candidates = engine.draw(pool_size).to(device=device, dtype=torch.float32)
     with torch.enable_grad():
-        residuals = compute_pde_residual(candidates, model, config.wind_u, config.wind_v, config.diffusion, reduction='none', create_graph=False).detach()
+        residuals = compute_pde_residual(candidates, model, config.wind_u, config.wind_v, config.wind_w, config.diffusion, config.diffusion_z, reduction='none', create_graph=False).detach()
     top_k = max(int(config.collocation_points * config.rar_fraction), 1)
     top_idx = torch.topk(residuals.squeeze(-1), k=min(top_k, pool_size), largest=True).indices
     return candidates[top_idx].detach()
@@ -296,26 +321,35 @@ def build_warmup_cosine_lambda(warmup_epochs: int, total_epochs: int, min_lr_rat
 def analytic_advection_diffusion_plume(
     x: np.ndarray,
     y: np.ndarray,
+    z: np.ndarray,
     t: np.ndarray,
     source_x: float,
     source_y: float,
+    source_z: float,
     wind_u: float,
     wind_v: float,
-    diffusion: float,
+    wind_w: float,
+    diffusion_h: float,
+    diffusion_z: float,
     source_strength: float = 1.0,
     initial_spread: float = 0.035,
 ) -> np.ndarray:
     effective_time = np.maximum(t, 0.0) + initial_spread
 
-    # Spatial 2D wind field mapping deflection (sinusoidal street canyon deflection)
+    # Spatial 3D wind field mapping deflection (sinusoidal street canyon deflection)
     local_wind_u = wind_u + 0.08 * np.sin(2.0 * math.pi * y)
     local_wind_v = wind_v + 0.08 * np.cos(2.0 * math.pi * x)
+    local_wind_w = wind_w
 
     advected_x = source_x + local_wind_u * t
     advected_y = source_y + local_wind_v * t
-    radial_distance_squared = (x - advected_x) ** 2 + (y - advected_y) ** 2
-    denominator = 4.0 * math.pi * diffusion * effective_time
-    exponent = -radial_distance_squared / (4.0 * diffusion * effective_time)
+    advected_z = source_z + local_wind_w * t
+    
+    radial_distance_squared_h = (x - advected_x) ** 2 + (y - advected_y) ** 2
+    radial_distance_squared_v = (z - advected_z) ** 2
+    
+    denominator = (4.0 * math.pi * effective_time) ** 1.5 * diffusion_h * math.sqrt(diffusion_z)
+    exponent = - (radial_distance_squared_h / (4.0 * diffusion_h * effective_time)) - (radial_distance_squared_v / (4.0 * diffusion_z * effective_time))
     return source_strength * np.exp(exponent) / denominator
 
 
@@ -325,34 +359,44 @@ def generate_synthetic_sensor_data(
     device: torch.device,
 ) -> SyntheticSensorDataset:
     source_x_arr, source_y_arr = lat_lon_to_normalized(sector.source_latitude, sector.source_longitude, sector)
+    source_z_arr = alt_to_normalized(sector.source_altitude, sector)
     source_x = float(np.asarray(source_x_arr))
     source_y = float(np.asarray(source_y_arr))
+    source_z = float(np.asarray(source_z_arr))
 
     rows: list[dict[str, Any]] = []
     x_values: list[float] = []
     y_values: list[float] = []
+    z_values: list[float] = []
     t_values: list[float] = []
     plume_signal_values: list[float] = []
 
     sample_times = np.linspace(0.05, 1.0, config.sensor_time_samples, dtype=np.float32)
     for sensor in SENSOR_STATIONS:
         sensor_x, sensor_y = lat_lon_to_normalized(sensor.latitude, sensor.longitude, sector)
+        sensor_z = alt_to_normalized(sensor.altitude, sector)
         sx = float(np.asarray(sensor_x))
         sy = float(np.asarray(sensor_y))
+        sz = float(np.asarray(sensor_z))
 
         for timestamp in sample_times:
             signal = analytic_advection_diffusion_plume(
                 np.asarray(sx, dtype=np.float32),
                 np.asarray(sy, dtype=np.float32),
+                np.asarray(sz, dtype=np.float32),
                 np.asarray(float(timestamp), dtype=np.float32),
                 source_x,
                 source_y,
+                source_z,
                 config.wind_u,
                 config.wind_v,
+                config.wind_w,
                 config.diffusion,
+                config.diffusion_z,
             )
             x_values.append(sx)
             y_values.append(sy)
+            z_values.append(sz)
             t_values.append(float(timestamp))
             plume_signal_values.append(float(signal))
 
@@ -365,20 +409,22 @@ def generate_synthetic_sensor_data(
     concentration_scale_ppb = float(np.max(so2_ppb))
     target = (so2_ppb / concentration_scale_ppb).astype(np.float32)
 
-    for i, (x, y, t, so2, c) in enumerate(zip(x_values, y_values, t_values, so2_ppb, target)):
+    for i, (x, y, z, t, so2, c) in enumerate(zip(x_values, y_values, z_values, t_values, so2_ppb, target)):
         sensor = SENSOR_STATIONS[i // config.sensor_time_samples]
         rows.append({
             'sensor_id': sensor.sensor_id,
             'latitude': sensor.latitude,
             'longitude': sensor.longitude,
+            'altitude': sensor.altitude,
             'x': float(x),
             'y': float(y),
+            'z': float(z),
             'elapsed_time': float(t),
             'so2_ppb': float(so2),
             'normalized_concentration': float(c),
         })
 
-    features = torch.tensor(np.column_stack([x_values, y_values, t_values]), dtype=torch.float32, device=device)
+    features = torch.tensor(np.column_stack([x_values, y_values, z_values, t_values]), dtype=torch.float32, device=device)
     concentration = torch.tensor(target, dtype=torch.float32, device=device).view(-1, 1)
 
     indices = torch.randperm(len(features))
@@ -413,9 +459,9 @@ def train_inversion_model(
     )
     ema = EMA(model, config.ema_decay)
 
-    colloc_engine = SobolEngine(dimension=3, scramble=True, seed=config.random_seed)
-    bound_engine = SobolEngine(dimension=2, scramble=True, seed=config.random_seed + 1)
-    rar_engine = SobolEngine(dimension=3, scramble=True, seed=config.random_seed + 2)
+    colloc_engine = SobolEngine(dimension=4, scramble=True, seed=config.random_seed)
+    bound_engine = SobolEngine(dimension=3, scramble=True, seed=config.random_seed + 1)
+    rar_engine = SobolEngine(dimension=4, scramble=True, seed=config.random_seed + 2)
 
     base_lambdas = {'data': config.lambda_data, 'physics': config.lambda_physics, 'boundary': config.lambda_boundary}
     rar_points: Tensor | None = None
@@ -438,7 +484,7 @@ def train_inversion_model(
         n_random = config.collocation_points if rar_points is None else max(config.collocation_points - rar_points.shape[0], 0)
         random_colloc = sample_collocation_points(n_random, device, colloc_engine)
         collocation = random_colloc if rar_points is None else torch.cat([random_colloc, rar_points], dim=0)
-        physics_loss = compute_pde_residual(collocation, model, config.wind_u, config.wind_v, config.diffusion)
+        physics_loss = compute_pde_residual(collocation, model, config.wind_u, config.wind_v, config.wind_w, config.diffusion, config.diffusion_z)
 
         boundary = sample_boundary_points(config.boundary_points, device, bound_engine)
         boundary_loss = model(boundary).square().mean()
@@ -547,7 +593,7 @@ def train_inversion_model(
         lbfgs.zero_grad(set_to_none=True)
         predicted = model(dataset.features)
         data_loss = F.mse_loss(predicted, dataset.concentration)
-        physics_loss = compute_pde_residual(lbfgs_fixed_collocation, model, config.wind_u, config.wind_v, config.diffusion)
+        physics_loss = compute_pde_residual(lbfgs_fixed_collocation, model, config.wind_u, config.wind_v, config.wind_w, config.diffusion, config.diffusion_z)
         boundary_loss = model(lbfgs_fixed_boundary).square().mean()
         loss = final_weights['data'] * data_loss + final_weights['physics'] * physics_loss + final_weights['boundary'] * boundary_loss
         loss.backward()
@@ -576,14 +622,20 @@ def evaluate_source_probability_grid(
     x_axis = np.linspace(0.0, 1.0, grid_size, dtype=np.float32)
     y_axis = np.linspace(0.0, 1.0, grid_size, dtype=np.float32)
     x_grid, y_grid = np.meshgrid(x_axis, y_axis)
+    
+    # Evaluate at the ground truth source altitude to properly project to 2D
+    target_alt_z = float(np.asarray(alt_to_normalized(sector.source_altitude, sector)))
+    
     t_grid = np.full_like(x_grid, fill_value=source_time, dtype=np.float32)
+    z_grid = np.full_like(x_grid, fill_value=target_alt_z, dtype=np.float32)
 
     x_tensor = torch.tensor(x_grid.reshape(-1, 1), dtype=torch.float32, device=device)
     y_tensor = torch.tensor(y_grid.reshape(-1, 1), dtype=torch.float32, device=device)
+    z_tensor = torch.tensor(z_grid.reshape(-1, 1), dtype=torch.float32, device=device)
     t_tensor = torch.tensor(t_grid.reshape(-1, 1), dtype=torch.float32, device=device)
 
     with torch.no_grad():
-        concentration = model(x_tensor, y_tensor, t_tensor)
+        concentration = model(x_tensor, y_tensor, z_tensor, t_tensor)
         concentration_grid = concentration.detach().cpu().numpy().reshape(grid_size, grid_size)
 
     baseline = float(np.percentile(concentration_grid, 5.0))

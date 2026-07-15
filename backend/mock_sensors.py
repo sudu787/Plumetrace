@@ -28,24 +28,25 @@ class SensorStation(TypedDict):
     sensor_id: str
     latitude: float
     longitude: float
+    altitude: float
 
 
 SENSOR_STATIONS_4: tuple[SensorStation, ...] = (
-    {"sensor_id": "industrial_north", "latitude": 40.7180, "longitude": -74.0060},
-    {"sensor_id": "residential_east", "latitude": 40.7140, "longitude": -73.9980},
-    {"sensor_id": "park_south", "latitude": 40.7080, "longitude": -74.0040},
-    {"sensor_id": "river_west", "latitude": 40.7120, "longitude": -74.0120},
+    {"sensor_id": "industrial_north", "latitude": 40.7180, "longitude": -74.0060, "altitude": 15.0},
+    {"sensor_id": "residential_east", "latitude": 40.7140, "longitude": -73.9980, "altitude": 5.0},
+    {"sensor_id": "park_south", "latitude": 40.7080, "longitude": -74.0040, "altitude": 3.0},
+    {"sensor_id": "river_west", "latitude": 40.7120, "longitude": -74.0120, "altitude": 10.0},
 )
 
 SENSOR_STATIONS_8: tuple[SensorStation, ...] = (
-    {"sensor_id": "industrial_north", "latitude": 40.7180, "longitude": -74.0060},
-    {"sensor_id": "residential_east", "latitude": 40.7140, "longitude": -73.9980},
-    {"sensor_id": "park_south", "latitude": 40.7080, "longitude": -74.0040},
-    {"sensor_id": "river_west", "latitude": 40.7120, "longitude": -74.0120},
-    {"sensor_id": "downtown_center", "latitude": 40.7130, "longitude": -74.0080},
-    {"sensor_id": "commercial_northeast", "latitude": 40.7160, "longitude": -74.0020},
-    {"sensor_id": "highway_southeast", "latitude": 40.7100, "longitude": -74.0000},
-    {"sensor_id": "suburban_southwest", "latitude": 40.7090, "longitude": -74.0100},
+    {"sensor_id": "industrial_north", "latitude": 40.7180, "longitude": -74.0060, "altitude": 15.0},
+    {"sensor_id": "residential_east", "latitude": 40.7140, "longitude": -73.9980, "altitude": 5.0},
+    {"sensor_id": "park_south", "latitude": 40.7080, "longitude": -74.0040, "altitude": 3.0},
+    {"sensor_id": "river_west", "latitude": 40.7120, "longitude": -74.0120, "altitude": 10.0},
+    {"sensor_id": "downtown_center", "latitude": 40.7130, "longitude": -74.0080, "altitude": 12.0},
+    {"sensor_id": "commercial_northeast", "latitude": 40.7160, "longitude": -74.0020, "altitude": 8.0},
+    {"sensor_id": "highway_southeast", "latitude": 40.7100, "longitude": -74.0000, "altitude": 4.0},
+    {"sensor_id": "suburban_southwest", "latitude": 40.7090, "longitude": -74.0100, "altitude": 6.0},
 )
 
 STATION_SETS = {
@@ -99,6 +100,7 @@ def build_reading(sensor: SensorStation, sequence: int) -> dict[str, float | str
         "timestamp": datetime.now(UTC).isoformat(),
         "latitude": round(sensor["latitude"] + random.uniform(-0.0001, 0.0001), 6),
         "longitude": round(sensor["longitude"] + random.uniform(-0.0001, 0.0001), 6),
+        "altitude": round(sensor["altitude"], 2),
         "pm25": round(pm25, 2),
         "so2": round(so2, 2),
         "wind_speed": round(random.uniform(7.0, 8.5), 2),

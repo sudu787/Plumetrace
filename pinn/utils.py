@@ -274,6 +274,25 @@ def normalized_to_lat_lon(
     return latitude.astype(np.float32), longitude.astype(np.float32)
 
 
+def alt_to_normalized(
+    altitude: float | np.ndarray,
+    alt_min: float, alt_max: float,
+) -> np.ndarray:
+    """Convert altitude (meters) to normalized [0,1] coordinates."""
+    alt_arr = np.asarray(altitude, dtype=np.float32)
+    z = (alt_arr - alt_min) / max(alt_max - alt_min, 1e-5)
+    return z.astype(np.float32)
+
+
+def normalized_to_alt(
+    z: np.ndarray,
+    alt_min: float, alt_max: float,
+) -> np.ndarray:
+    """Convert normalized [0,1] z coordinates back to altitude in meters."""
+    altitude = alt_min + z * (alt_max - alt_min)
+    return altitude.astype(np.float32)
+
+
 # ── Timer Context Manager ─────────────────────────────────────────
 
 class Timer:

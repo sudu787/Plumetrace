@@ -16,6 +16,7 @@ class SensorStation:
     sensor_id: str
     latitude: float
     longitude: float
+    altitude: float = 10.0  # Ground/rooftop elevation in meters
 
 
 @dataclass(frozen=True)
@@ -25,8 +26,11 @@ class CitySector:
     lat_max: float = 40.7220
     lon_min: float = -74.0160
     lon_max: float = -73.9940
+    alt_min: float = 0.0     # Ground level (meters)
+    alt_max: float = 200.0   # Boundary layer height (meters)
     source_latitude: float = 40.7138
     source_longitude: float = -74.0072
+    source_altitude: float = 45.0  # Stack height in meters
 
 
 @dataclass(frozen=True)
@@ -117,7 +121,9 @@ class TrainingConfig:
     # ── Physics Base ────────────────────────────────────────────────
     wind_u: float = 0.16
     wind_v: float = -0.06
-    diffusion: float = 0.006
+    wind_w: float = 0.02      # Vertical thermal lofting
+    diffusion: float = 0.006  # Horizontal diffusion D_h
+    diffusion_z: float = 0.001 # Vertical diffusion D_v
     sensor_time_samples: int = 96
     random_seed: int = 2026
 
@@ -167,10 +173,10 @@ class TrainingConfig:
 
 # ── Default Sensor Stations ─────────────────────────────────────────
 SENSOR_STATIONS: Tuple[SensorStation, ...] = (
-    SensorStation('industrial_north', 40.7180, -74.0060),
-    SensorStation('residential_east', 40.7140, -73.9980),
-    SensorStation('park_south', 40.7080, -74.0040),
-    SensorStation('river_west', 40.7120, -74.0120),
+    SensorStation('industrial_north', 40.7180, -74.0060, 15.0),
+    SensorStation('residential_east', 40.7140, -73.9980, 5.0),
+    SensorStation('park_south', 40.7080, -74.0040, 3.0),
+    SensorStation('river_west', 40.7120, -74.0120, 10.0),
 )
 
 SECTOR = CitySector()
